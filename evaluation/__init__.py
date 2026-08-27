@@ -1,0 +1,1 @@
+"""Deterministic DayPilot evaluation suite."""

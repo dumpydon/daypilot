@@ -1,0 +1,1 @@
+"""Typed DayPilot domain contracts."""

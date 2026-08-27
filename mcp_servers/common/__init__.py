@@ -1,0 +1,1 @@
+"""Shared demo service persistence."""
