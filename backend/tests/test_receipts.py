@@ -50,13 +50,13 @@ def test_provider_url_is_used_only_when_the_result_supplies_one() -> None:
     assert receipt.external_url == "https://calendar.google.com/event/abc"
 
 
-def test_failed_verification_is_not_presented_as_verified() -> None:
+def test_failed_verification_is_presented_as_created_but_not_verified() -> None:
     receipt = build_resource_receipts(
         [calendar_result()],
         [{"action_id": "calendar-1", "verified": False, "detail": "Read-back failed."}],
     )[0]
 
-    assert receipt.status == "failed"
+    assert receipt.status == "created"
     assert receipt.verified is False
     assert receipt.verification_detail == "Read-back failed."
 
@@ -95,7 +95,7 @@ def test_failed_and_multiple_writes_remain_distinct() -> None:
     assert receipts[1].verified is False
     assert receipts[1].error == "Task service unavailable"
     assert receipts[2].title == "Draft created"
-    assert receipts[2].secondary_text == '“Follow-up after interview” · To: person@example.com'
+    assert receipts[2].secondary_text == "“Follow-up after interview” · To: person@example.com"
     assert receipts[2].status == "created"
 
 
@@ -124,3 +124,42 @@ def test_task_batch_items_and_receipt_are_grounded_without_summary_prose() -> No
     assert receipt.title == "Created 2 tasks"
     assert [item.title for item in receipt.items] == ["Review notes", "Prepare questions"]
     assert [item.resource_id for item in receipt.items] == ["task-1", "task-2"]
+
+
+def test_partial_task_batch_is_not_presented_as_fully_verified() -> None:
+    receipt = build_resource_receipts(
+        [
+            {
+                "action_id": "tasks-partial",
+                "tool_name": "create_task_batch",
+                "result": {
+                    "tasks": [{"id": "task-1", "title": "Created task", "due_at": None}],
+                    "failed": [{"title": "Unavailable task", "error": "quota"}],
+                    "count": 1,
+                    "status": "partially_created",
+                },
+                "success": True,
+                "error": None,
+            }
+        ],
+        [{"action_id": "tasks-partial", "verified": False}],
+    )[0]
+
+    assert receipt.status == "partially_completed"
+    assert receipt.verified is False
+
+
+def test_unavailable_verification_stays_created_not_verified() -> None:
+    receipt = build_resource_receipts(
+        [calendar_result()],
+        [
+            {
+                "action_id": "calendar-1",
+                "verified": False,
+                "detail": "Verification read failed: timeout",
+            }
+        ],
+    )[0]
+
+    assert receipt.status == "created"
+    assert receipt.verified is False

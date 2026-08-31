@@ -18,6 +18,7 @@ export function makeRun(overrides: Partial<RunDetail> = {}): RunDetail {
         reason: "Ground the interview facts.",
         side_effecting: false,
         status: "completed",
+        depends_on: [],
       },
       {
         id: "write-1",
@@ -28,6 +29,7 @@ export function makeRun(overrides: Partial<RunDetail> = {}): RunDetail {
         reason: "The calendar tool returned the slot as free.",
         side_effecting: true,
         status: "pending",
+        depends_on: ["read-1"],
       },
     ],
     final_summary: null,

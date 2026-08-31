@@ -5,9 +5,15 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 
 import {
   API_URL,
+  addFileRoot,
+  disconnectGoogle,
+  disconnectX,
   createRun,
   decideRun,
   editRun,
+  getConnections,
+  listFileRoots,
+  removeFileRoot,
   getHealth,
   getPreferences,
   getRun,
@@ -16,8 +22,17 @@ import {
   clearRunHistory,
   resetDemoWorkspace,
   savePreferences,
+  startGoogleConnection,
+  startXConnection,
 } from "@/lib/api";
-import type { Preferences, RunDetail, RunRecord, ToolCatalog } from "@/lib/types";
+import type {
+  ConnectionCatalog,
+  FileRoot,
+  Preferences,
+  RunDetail,
+  RunRecord,
+  ToolCatalog,
+} from "@/lib/types";
 
 import { ContextPanel } from "./ContextPanel";
 import { ConfirmationDialog } from "./ConfirmationDialog";
@@ -49,9 +64,14 @@ const emptyCatalog: ToolCatalog = {
   tools: [],
 };
 
+const emptyConnections: ConnectionCatalog = {
+  demo_mode: true,
+  connections: [],
+};
+
 const streamEvents = [
   "request_received", "request_understood", "tools_discovered",
-  "context_gathering_started", "tool_called", "tool_completed", "tool_failed",
+  "context_gathering_started", "tool_called", "tool_completed", "tool_failed", "tool_blocked",
   "context_gathered", "plan_generated", "approval_required", "approval_received",
   "plan_feedback_received", "replanning_started", "plan_revised",
   "execution_started", "action_started", "action_completed",
@@ -60,6 +80,8 @@ const streamEvents = [
 
 export function DayPilotWorkspace() {
   const [catalog, setCatalog] = useState<ToolCatalog>(emptyCatalog);
+  const [connections, setConnections] = useState<ConnectionCatalog>(emptyConnections);
+  const [fileRoots, setFileRoots] = useState<FileRoot[]>([]);
   const [preferences, setPreferences] = useState<Preferences>(defaultPreferences);
   const [runs, setRuns] = useState<RunRecord[]>([]);
   const [activeRun, setActiveRun] = useState<RunDetail | null>(null);
@@ -91,10 +113,12 @@ export function DayPilotWorkspace() {
   const [maintenanceMessage, setMaintenanceMessage] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  const hasUnsafeRun = busy || Boolean(
-    activeRun && ["queued", "running", "resuming", "waiting_approval"].includes(activeRun.status),
-  ) || runs.some((run) => ["queued", "running", "resuming", "waiting_approval"].includes(run.status));
-  const maintenanceBlockMessage = hasUnsafeRun
+  const hasProcessingRun = busy || Boolean(
+    activeRun && ["queued", "running", "resuming"].includes(activeRun.status),
+  ) || runs.some((run) => ["queued", "running", "resuming"].includes(run.status));
+  const hasPendingApproval = Boolean(activeRun?.status === "waiting_approval")
+    || runs.some((run) => run.status === "waiting_approval");
+  const maintenanceBlockMessage = hasProcessingRun || hasPendingApproval
     ? "Finish or reject active or approval-required runs before changing demo data or clearing history."
     : null;
 
@@ -127,16 +151,35 @@ export function DayPilotWorkspace() {
   }, []);
 
   useEffect(() => {
-    Promise.all([getTools(), getPreferences(), listRuns()])
-      .then(([nextCatalog, nextPreferences, nextRuns]) => {
+    Promise.all([getTools(), getPreferences(), listRuns(), getConnections(), listFileRoots()])
+      .then(([nextCatalog, nextPreferences, nextRuns, nextConnections, nextFileRoots]) => {
         setCatalog(nextCatalog);
         setPreferences(nextPreferences);
         setRuns(nextRuns);
+        setConnections(nextConnections);
+        setFileRoots(nextFileRoots);
       })
       .catch((cause: unknown) => setError(messageFrom(cause)));
     getHealth()
       .then((health) => setRuntimeMode(health.reasoning_mode))
       .catch(() => setRuntimeMode("unavailable"));
+  }, []);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const connection = params.get("connection");
+    if (!connection) return;
+    const successMessage = connection.endsWith("_connected")
+      ? `${connection.startsWith("google") ? "Google Workspace" : "X"} connected.`
+      : null;
+    const errorMessage = connection.endsWith("_error")
+      ? params.get("message") || "The connection could not be completed."
+      : null;
+    queueMicrotask(() => {
+      if (successMessage) setNotice(successMessage);
+      if (errorMessage) setError(errorMessage);
+    });
+    window.history.replaceState({}, "", window.location.pathname);
   }, []);
 
   useEffect(() => {
@@ -174,6 +217,7 @@ export function DayPilotWorkspace() {
     : runtimeMode;
   const activeId = activeRun?.id ?? null;
   const shortId = useMemo(() => activeId?.replace("run-", "").slice(0, 6).toUpperCase(), [activeId]);
+  const presentedStatus = activeRun ? presentationStatus(activeRun) : null;
 
   async function start(goal: string) {
     setBusy(true);
@@ -234,8 +278,53 @@ export function DayPilotWorkspace() {
     setPreferences(saved);
   }
 
+  async function refreshConnections() {
+    const [nextConnections, nextFileRoots, nextCatalog] = await Promise.all([
+      getConnections(),
+      listFileRoots(),
+      getTools(),
+    ]);
+    setConnections(nextConnections);
+    setFileRoots(nextFileRoots);
+    setCatalog(nextCatalog);
+  }
+
+  async function connectGoogle() {
+    const result = await startGoogleConnection();
+    window.location.assign(result.authorization_url);
+  }
+
+  async function disconnectGoogleAccount() {
+    await disconnectGoogle();
+    await refreshConnections();
+    setNotice("Google Workspace disconnected.");
+  }
+
+  async function connectX() {
+    const result = await startXConnection();
+    window.location.assign(result.authorization_url);
+  }
+
+  async function disconnectXAccount() {
+    await disconnectX();
+    await refreshConnections();
+    setNotice("X disconnected.");
+  }
+
+  async function addLocalFileRoot(path: string) {
+    await addFileRoot(path);
+    await refreshConnections();
+    setNotice("Local folder connected.");
+  }
+
+  async function removeLocalFileRoot(rootId: string) {
+    await removeFileRoot(rootId);
+    await refreshConnections();
+    setNotice("Local folder removed.");
+  }
+
   function requestMaintenanceAction(action: "reset" | "clear") {
-    setMaintenanceMessage(null);
+    setMaintenanceMessage(hasPendingApproval ? maintenanceBlockMessage : null);
     setMaintenanceAction(action);
   }
 
@@ -317,7 +406,7 @@ export function DayPilotWorkspace() {
             onCloseMobile={() => setMobileSidebarOpen(false)}
             onWidthChange={setSidebarWidthOverride}
           />
-          <section className={styles.workspace}>
+          <section className={`${styles.workspace} ${activeRun ? styles.workspaceActive : ""}`}>
             {error && <div className={styles.errorBanner}><AlertTriangle size={14} /><span>{error}</span><button onClick={() => setError(null)}>Dismiss</button></div>}
             {!activeRun ? (
               <div className={styles.startView}>
@@ -346,14 +435,33 @@ export function DayPilotWorkspace() {
             ) : (
               <>
                 <div className={styles.requestBar}>
-                  <div><span className={styles.eyebrow}>Active request</span><h1>{activeRun.user_request}</h1></div>
-                  <div className={styles.runMeta}><span className={styles[`runStatus_${activeRun.status}`]}>{prettyStatus(activeRun.status)}</span><span className={styles.runId}>Run · {shortId}</span><button onClick={() => refreshActive(activeRun.id)} aria-label="Refresh run"><RotateCcw size={12} /></button></div>
+                  <div className={styles.requestCopy}>
+                    <span className={styles.eyebrow}>Active request</span>
+                    <h1 title={activeRun.user_request}>{activeRun.user_request}</h1>
+                  </div>
+                  <div className={styles.runMeta}>
+                    <div className={`${styles.currentState} ${styles[`currentState_${presentedStatus ?? activeRun.status}`]}`} aria-live="polite">
+                      <i />
+                      <div>
+                        <strong>{currentStateLabel(activeRun, presentedStatus ?? activeRun.status)}</strong>
+                        <span>
+                          <b className={`${styles.runStatus} ${styles[`runStatus_${presentedStatus ?? activeRun.status}`]}`}>{prettyStatus(presentedStatus ?? activeRun.status)}</b>
+                          <span className={styles.runId}>Run {shortId}</span>
+                        </span>
+                      </div>
+                    </div>
+                    <button onClick={() => refreshActive(activeRun.id)} aria-label="Refresh run" title="Refresh run">
+                      <RotateCcw size={14} />
+                    </button>
+                  </div>
                 </div>
-                <div className={styles.grid}>
-                  <PlanPanel key={activeRun.plan_revision} run={activeRun} busy={busy} onApprove={() => decide("approve")} onReject={() => decide("reject")} onEdit={revise} />
-                  <TimelinePanel events={activeRun.events} />
-                  <ContextPanel context={activeRun.context} />
-                  <ToolInspector catalog={catalog} collapsible />
+                <div className={`${styles.grid} ${["completed", "failed", "rejected"].includes(activeRun.status) ? styles.gridResolved : ""}`}>
+                  <PlanPanel key={`${activeRun.id}-${activeRun.plan_revision}-${activeRun.status}`} run={activeRun} busy={busy} onApprove={() => decide("approve")} onReject={() => decide("reject")} onEdit={revise} />
+                  <TimelinePanel events={activeRun.events} runId={activeRun.id} runStatus={activeRun.status} />
+                  <div className={styles.inspectorShelf}>
+                    <ContextPanel context={activeRun.context} />
+                    <ToolInspector catalog={catalog} collapsible />
+                  </div>
                 </div>
               </>
             )}
@@ -366,9 +474,17 @@ export function DayPilotWorkspace() {
             onSave={persistPreferences}
             onResetDemoRequest={() => requestMaintenanceAction("reset")}
             onClearHistoryRequest={() => requestMaintenanceAction("clear")}
-            maintenanceBlocked={hasUnsafeRun}
+            maintenanceBlocked={hasProcessingRun}
             maintenanceMessage={maintenanceBlockMessage}
             maintenanceBusy={maintenanceBusy}
+            connections={connections}
+            fileRoots={fileRoots}
+            onConnectGoogle={connectGoogle}
+            onDisconnectGoogle={disconnectGoogleAccount}
+            onConnectX={connectX}
+            onDisconnectX={disconnectXAccount}
+            onAddFileRoot={addLocalFileRoot}
+            onRemoveFileRoot={removeLocalFileRoot}
           />
         )}
         {maintenanceAction === "reset" && (
@@ -421,6 +537,29 @@ function delay(milliseconds: number) {
 
 function prettyStatus(value: string) {
   return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function currentStateLabel(run: RunDetail, status: RunDetail["status"]) {
+  if (status === "completed") return "Run complete";
+  if (status === "failed") return run.status === "completed" ? "Completed with issues" : "Run needs attention";
+  if (status === "rejected") return "Closed safely";
+  if (status === "waiting_approval") return "Waiting for your approval";
+  return run.events.at(-1)?.title ?? prettyStatus(run.status);
+}
+
+function presentationStatus(run: RunDetail): RunDetail["status"] {
+  if (run.status !== "completed") return run.status;
+  const impossibleEmptySuccess = run.created_outputs.some((output) => (
+    output.resource_type === "task_batch"
+    && output.status === "verified"
+    && output.verified
+    && output.items.length === 0
+    && /\b(?:created\s+)?0\s+tasks?\b/i.test(output.title)
+  ));
+  const reportedFailure = run.created_outputs.some(
+    (output) => output.status === "failed" || output.status === "partially_completed",
+  );
+  return run.error || reportedFailure || impossibleEmptySuccess ? "failed" : run.status;
 }
 
 function subscribeToSidebarStorage(onStoreChange: () => void) {

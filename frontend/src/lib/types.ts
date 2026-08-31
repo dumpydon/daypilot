@@ -55,6 +55,7 @@ export interface PlanAction {
   reason: string;
   side_effecting: boolean;
   status: "completed" | "pending" | "approved" | "executed" | "verified" | "failed" | "skipped";
+  depends_on: string[];
 }
 
 export interface TimelineEvent {
@@ -184,9 +185,49 @@ export interface MCPServer {
   tool_count: number;
   tools: string[];
   error: string | null;
+  provider?: string;
+  provider_state?: "connected" | "disconnected" | "connecting" | "reconnect_required" | "error" | "unavailable";
+  account_label?: string | null;
+  requires_reauth?: boolean;
+  last_error?: string | null;
+  connection_mode?: "demo" | "managed" | "direct" | "local";
 }
 
 export interface ToolCatalog {
   servers: MCPServer[];
   tools: ToolMetadata[];
+}
+
+export type ProviderConnectionState = "connected" | "disconnected" | "connecting" | "reconnect_required" | "error" | "unavailable";
+
+export interface ProviderConnection {
+  service: "mail" | "calendar" | "tasks" | "files" | "x";
+  provider: string;
+  state: ProviderConnectionState;
+  account_label: string | null;
+  capabilities: string[];
+  last_error: string | null;
+  requires_reauth: boolean;
+  metadata: Record<string, unknown>;
+  connection_mode?: "demo" | "managed" | "direct" | "local";
+}
+
+export interface ConnectionCatalog {
+  demo_mode: boolean;
+  connections: ProviderConnection[];
+}
+
+export interface OAuthStartResponse {
+  provider: "google" | "x";
+  authorization_url: string;
+  scopes: string[];
+  mode?: "managed" | "direct";
+}
+
+export interface FileRoot {
+  id: string;
+  path: string;
+  label: string;
+  exists: boolean;
+  added_at: string;
 }

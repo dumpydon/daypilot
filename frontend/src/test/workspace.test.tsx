@@ -7,17 +7,20 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CapabilityStrip } from "@/components/CapabilityStrip";
 import { ConfirmationDialog } from "@/components/ConfirmationDialog";
+import { ConnectionSettings } from "@/components/ConnectionSettings";
+import { ContextPanel } from "@/components/ContextPanel";
 import { CreatedOutputs } from "@/components/CreatedOutputs";
 import { DayPilotLogo } from "@/components/DayPilotLogo";
 import { Header } from "@/components/Header";
 import { PlanPanel } from "@/components/PlanPanel";
+import { PlanDependencyGraph } from "@/components/PlanDependencyGraph";
 import { PreferencesDialog } from "@/components/PreferencesDialog";
 import { RequestComposer } from "@/components/RequestComposer";
 import { Sidebar } from "@/components/Sidebar";
 import { HERO_MOTION, HERO_WORDS } from "@/components/RotatingHeroWord";
 import { TimelinePanel } from "@/components/TimelinePanel";
 import { ToolInspector } from "@/components/ToolInspector";
-import { editRun } from "@/lib/api";
+import { editRun, listRuns } from "@/lib/api";
 import { runDisplayTitle } from "@/lib/runPresentation";
 
 import { capabilityCatalog, makeEvent, makeRun, toolCatalog } from "./factories";
@@ -55,7 +58,15 @@ function CapabilityHarness() {
   );
 }
 
-function SidebarHarness({ run, onSelect }: { run: ReturnType<typeof makeRun>; onSelect: (runId: string) => void }) {
+function SidebarHarness({
+  run,
+  onSelect,
+  onPreferences = vi.fn(),
+}: {
+  run: ReturnType<typeof makeRun>;
+  onSelect: (runId: string) => void;
+  onPreferences?: () => void;
+}) {
   return (
     <Sidebar
       runs={[run]}
@@ -65,12 +76,84 @@ function SidebarHarness({ run, onSelect }: { run: ReturnType<typeof makeRun>; on
       mobileOpen={false}
       onSelect={onSelect}
       onNew={vi.fn()}
-      onPreferences={vi.fn()}
+      onPreferences={onPreferences}
       onToggle={vi.fn()}
       onCloseMobile={vi.fn()}
       onWidthChange={vi.fn()}
     />
   );
+}
+
+function timelineEvents(count: number) {
+  return Array.from({ length: count }, (_, index) => makeEvent({
+    id: index + 1,
+    event_type: `step_${index + 1}`,
+    state: index === count - 1 ? "running" : "completed",
+    title: `Workflow step ${index + 1}`,
+    detail: `Detail ${index + 1}`,
+    created_at: `2026-08-25T10:${String(index).padStart(2, "0")}:00Z`,
+  }));
+}
+
+function dependencyActions() {
+  const run = makeRun();
+  const readMail = { ...run.plan[0], id: "mail", depends_on: [] };
+  const readThread = {
+    ...run.plan[0],
+    id: "thread",
+    tool_name: "get_thread",
+    description: "Read interview thread",
+    depends_on: ["mail"],
+  };
+  const createEvent = {
+    ...run.plan[1],
+    id: "event",
+    description: "Create interview preparation block",
+    depends_on: ["thread"],
+  };
+  const createTask = {
+    ...run.plan[1],
+    id: "task",
+    server_name: "tasks",
+    tool_name: "create_task",
+    description: "Create interview preparation task",
+    depends_on: ["thread"],
+  };
+  return [readMail, readThread, createEvent, createTask];
+}
+
+function completedDependencyRun(overrides: Partial<ReturnType<typeof makeRun>> = {}) {
+  return makeRun({
+    id: "completed-dependency-run",
+    status: "completed",
+    approval_status: "approved",
+    final_summary: "The requested actions were completed and verified.",
+    plan: dependencyActions(),
+    ...overrides,
+  });
+}
+
+function mockTimelineScroll() {
+  const scrollTo = vi.fn(function scrollTo(this: HTMLElement, options: ScrollToOptions) {
+    this.scrollTop = typeof options.top === "number" ? options.top : this.scrollTop;
+  });
+  Object.defineProperty(HTMLElement.prototype, "scrollTo", {
+    configurable: true,
+    writable: true,
+    value: scrollTo,
+  });
+  return scrollTo;
+}
+
+function setTimelineMetrics(
+  element: HTMLElement,
+  values: { scrollTop: number; scrollHeight: number; clientHeight: number },
+) {
+  Object.defineProperties(element, {
+    scrollTop: { configurable: true, writable: true, value: values.scrollTop },
+    scrollHeight: { configurable: true, value: values.scrollHeight },
+    clientHeight: { configurable: true, value: values.clientHeight },
+  });
 }
 
 describe("DayPilot operations workspace", () => {
@@ -79,10 +162,26 @@ describe("DayPilot operations workspace", () => {
     const logo = screen.getByRole("img", { name: "DayPilot logo" });
     expect(logo).toHaveAttribute("width", "16");
     expect(logo).toHaveAttribute("height", "16");
-    expect(logo.querySelectorAll("path")).toHaveLength(4);
+    expect(logo.querySelectorAll("path")).toHaveLength(2);
+    const geometry = [...logo.querySelectorAll("path")].map((path) => path.getAttribute("d"));
+    expect(geometry.every(Boolean)).toBe(true);
 
     rerender(<DayPilotLogo size={64} active />);
     expect(screen.getByRole("img", { name: "DayPilot logo" }).getAttribute("class")).toContain("logoActive");
+    expect([...logo.querySelectorAll("path")].map((path) => path.getAttribute("d"))).toEqual(geometry);
+
+    rerender(<DayPilotLogo size={24} monochrome active aria-label="DayPilot monochrome logo" />);
+    expect(screen.getByRole("img", { name: "DayPilot monochrome logo" }).querySelector("g")).toHaveAttribute("fill", "currentColor");
+  });
+
+  it("links both the header logo and wordmark to home with keyboard access", async () => {
+    render(<Header servers={capabilityCatalog.servers} reasoningMode="openai" onMenu={vi.fn()} />);
+    const home = screen.getByRole("link", { name: "DayPilot home" });
+    expect(home).toHaveAttribute("href", "/");
+    expect(home).toContainElement(screen.getByRole("img", { name: "DayPilot logo" }));
+    expect(home).toContainElement(screen.getByText("DayPilot", { exact: true }));
+    await userEvent.tab();
+    expect(home).toHaveFocus();
   });
 
   it("keeps OpenAI and local runtime status in one compact group", () => {
@@ -91,13 +190,48 @@ describe("DayPilot operations workspace", () => {
     expect(group).toHaveTextContent("OpenAI runtime");
     expect(group).toHaveTextContent("Local runtime");
     expect(screen.getByTestId("openai-runtime-indicator")).toHaveAttribute("data-runtime-state", "ready");
-    expect(screen.getByText("5/5 MCP servers")).toBeInTheDocument();
+    expect(screen.getByLabelText("5/5 MCP servers")).toBeInTheDocument();
 
     view.rerender(<Header servers={capabilityCatalog.servers} reasoningMode="deterministic_demo" onMenu={vi.fn()} />);
     expect(screen.getByRole("group", { name: "Runtime status" })).toHaveTextContent("OpenAI unavailable");
     expect(screen.getByTestId("openai-runtime-indicator")).toHaveAttribute("data-runtime-state", "unavailable");
     view.rerender(<Header servers={capabilityCatalog.servers} reasoningMode="openai" onMenu={vi.fn()} />);
     expect(screen.getByTestId("openai-runtime-indicator")).toHaveAttribute("data-runtime-state", "ready");
+  });
+
+  it("marks Mail as used when search_mail succeeds without a thread read", () => {
+    render(
+      <ContextPanel
+        context={{
+          mail: [{
+            tool_name: "search_mail",
+            arguments: { query: "DayPilot interview test" },
+            description: "Search mail",
+            reason: "Find the matching email.",
+            result: { threads: [{ thread_id: "thread-1" }], count: 1 },
+            success: true,
+            error: null,
+          }],
+          calendar: [{
+            tool_name: "list_events",
+            arguments: {},
+            description: "Read calendar events",
+            reason: "Check availability.",
+            result: null,
+            success: false,
+            error: "Blocked",
+          }],
+          tasks: [],
+          files: [],
+          x: [],
+        }}
+      />,
+    );
+
+    expect(screen.getByText("1 thread")).toBeInTheDocument();
+    expect(screen.getAllByText("Not queried").length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: /view details/i }));
+    expect(screen.getByText("1 matching mail thread returned by search.")).toBeInTheDocument();
   });
 
   it("renders compact stable run titles with the original request preview", () => {
@@ -121,6 +255,19 @@ describe("DayPilot operations workspace", () => {
     view.rerender(<SidebarHarness run={run} onSelect={onSelect} />);
     expect(screen.getByTestId("history-title-run-history")).toHaveTextContent("MCP launch research");
     expect(runDisplayTitle({ user_request: "Find my latest resume." })).toBe("Resume lookup");
+  });
+
+  it("uses the larger wand-and-settings trigger without changing its click behavior", () => {
+    const onPreferences = vi.fn();
+    render(<SidebarHarness run={makeRun()} onSelect={vi.fn()} onPreferences={onPreferences} />);
+
+    const trigger = screen.getByRole("button", { name: "Open preferences" });
+    expect(trigger).toHaveAttribute("title", "Preferences");
+    expect(trigger.className).toContain("preferencesTrigger");
+    expect(trigger.querySelectorAll("svg")).toHaveLength(2);
+    expect(screen.getByText("Preferences and settings and more")).toBeInTheDocument();
+    fireEvent.click(trigger);
+    expect(onPreferences).toHaveBeenCalledOnce();
   });
 
   it("renders read and write actions with approval controls", () => {
@@ -181,6 +328,22 @@ describe("DayPilot operations workspace", () => {
     expect(screen.getByText("Finish or reject active runs first.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Reset demo workspace" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Clear run history" })).toBeDisabled();
+
+    view.rerender(
+      <PreferencesDialog
+        preferences={preferences}
+        onClose={vi.fn()}
+        onSave={vi.fn()}
+        onResetDemoRequest={reset}
+        onClearHistoryRequest={clear}
+        maintenanceBlocked={false}
+        maintenanceMessage="Finish or reject active or approval-required runs before changing demo data or clearing history."
+        maintenanceBusy={false}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Reset demo workspace" })).not.toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Reset demo workspace" }));
+    expect(reset).toHaveBeenCalledTimes(2);
   });
 
   it("requires explicit confirmation for destructive maintenance actions", () => {
@@ -203,6 +366,128 @@ describe("DayPilot operations workspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(confirm).toHaveBeenCalledOnce();
     expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("shows provider provenance and connected controls without exposing credentials", async () => {
+    const catalog = {
+      demo_mode: false,
+      connections: [
+        {
+          service: "mail" as const,
+          provider: "Gmail",
+          state: "disconnected" as const,
+          account_label: "alex@example.com",
+          capabilities: ["search_mail"],
+          last_error: null,
+          requires_reauth: false,
+          metadata: { mode: "gmail" },
+        },
+        {
+          service: "calendar" as const,
+          provider: "Google Calendar",
+          state: "disconnected" as const,
+          account_label: "alex@example.com",
+          capabilities: ["list_events"],
+          last_error: null,
+          requires_reauth: false,
+          metadata: { mode: "google_calendar" },
+        },
+        {
+          service: "tasks" as const,
+          provider: "Google Tasks",
+          state: "disconnected" as const,
+          account_label: "alex@example.com",
+          capabilities: ["list_tasks"],
+          last_error: null,
+          requires_reauth: false,
+          metadata: { mode: "google_tasks" },
+        },
+        {
+          service: "files" as const,
+          provider: "Local Mac",
+          state: "disconnected" as const,
+          account_label: null,
+          capabilities: ["read_file"],
+          last_error: null,
+          requires_reauth: false,
+          metadata: { mode: "local" },
+        },
+        {
+          service: "x" as const,
+          provider: "X",
+          state: "disconnected" as const,
+          account_label: null,
+          capabilities: ["search_posts"],
+          last_error: null,
+          requires_reauth: false,
+          metadata: { mode: "x_api" },
+        },
+      ],
+    };
+    const connectGoogle = vi.fn(async () => {});
+    render(
+      <ConnectionSettings
+        catalog={catalog}
+        fileRoots={[]}
+        onConnectGoogle={connectGoogle}
+        onDisconnectGoogle={vi.fn(async () => {})}
+        onConnectX={vi.fn(async () => {})}
+        onDisconnectX={vi.fn(async () => {})}
+        onAddFileRoot={vi.fn(async () => {})}
+        onRemoveFileRoot={vi.fn(async () => {})}
+      />,
+    );
+    expect(screen.getByText(/Mail · Calendar · Tasks/)).toHaveTextContent("alex@example.com");
+    expect(screen.getByRole("button", { name: "Connect Google" })).toBeInTheDocument();
+    expect(screen.queryByText("google-access-token")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Connect Google" }));
+    expect(connectGoogle).toHaveBeenCalledOnce();
+  });
+
+  it("shows X managed-auth unavailability without exposing a broken connect action", () => {
+    const catalog = {
+      demo_mode: false,
+      connections: [
+        ...capabilityCatalog.servers.slice(0, 3).map((server, index) => ({
+          service: (["mail", "calendar", "tasks"] as const)[index],
+          provider: "Google Workspace",
+          state: "disconnected" as const,
+          account_label: null,
+          capabilities: server.tools,
+          last_error: "Connect Google Workspace through Composio to use this capability.",
+          requires_reauth: false,
+          metadata: { mode: "managed", toolkit: "googlesuper" },
+          connection_mode: "managed" as const,
+        })),
+        {
+          service: "files" as const, provider: "Local Mac", state: "disconnected" as const,
+          account_label: "0 folders", capabilities: [], last_error: null, requires_reauth: false,
+          metadata: { mode: "local" }, connection_mode: "local" as const,
+        },
+        {
+          service: "x" as const, provider: "X", state: "unavailable" as const,
+          account_label: null, capabilities: [],
+          last_error: "Managed connection is currently unavailable for X.", requires_reauth: false,
+          metadata: { mode: "managed", toolkit: "twitter" }, connection_mode: "managed" as const,
+        },
+      ],
+    };
+    render(
+      <ConnectionSettings
+        catalog={catalog}
+        fileRoots={[]}
+        onConnectGoogle={vi.fn(async () => {})}
+        onDisconnectGoogle={vi.fn(async () => {})}
+        onConnectX={vi.fn(async () => {})}
+        onDisconnectX={vi.fn(async () => {})}
+        onAddFileRoot={vi.fn(async () => {})}
+        onRemoveFileRoot={vi.fn(async () => {})}
+      />,
+    );
+    expect(screen.getByText("Managed connection unavailable")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Connect Google" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Connect X" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/ToolRouterV2|auth configs|request id/i)).not.toBeInTheDocument();
   });
 
   it("renders a grounded demo calendar receipt and opens its stored details", async () => {
@@ -239,7 +524,7 @@ describe("DayPilot operations workspace", () => {
       />,
     );
 
-    expect(screen.getByRole("heading", { name: "Created outputs" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Created resource" })).toBeInTheDocument();
     expect(screen.getByText("Study block")).toBeInTheDocument();
     expect(screen.getByText("Sun, Aug 30 · 8:00 PM–9:30 PM")).toBeInTheDocument();
     expect(screen.getByText("Verified")).toBeInTheDocument();
@@ -321,10 +606,353 @@ describe("DayPilot operations workspace", () => {
     expect(screen.getByText("Failed")).toBeInTheDocument();
   });
 
+  it("never presents an empty task batch as verified success", () => {
+    render(
+      <CreatedOutputs
+        outputs={[{
+          action_id: "tasks-empty",
+          resource_type: "task_batch",
+          provider: "Google Tasks",
+          resource_id: null,
+          title: "Created 0 tasks",
+          secondary_text: null,
+          status: "verified",
+          verified: true,
+          verification_detail: "Persisted state confirmed.",
+          external_url: null,
+          items: [],
+          details: [{ label: "Count", value: "0" }],
+          error: null,
+        }]}
+      />,
+    );
+
+    expect(screen.getByText("No tasks created")).toBeInTheDocument();
+    expect(screen.getByText("Failed")).toBeInTheDocument();
+    expect(screen.getByText("The provider returned no created task resources.")).toBeInTheDocument();
+    expect(screen.queryByText("Verified")).not.toBeInTheDocument();
+  });
+
   it("renders semantic approval state in the execution timeline", () => {
     render(<TimelinePanel events={[makeEvent()]} />);
-    expect(screen.getByText("Waiting for human approval")).toBeInTheDocument();
+    expect(screen.getAllByText("Waiting for human approval").length).toBeGreaterThan(0);
     expect(screen.getByText(/3 external changes are blocked/i)).toBeInTheDocument();
+    expect(screen.getByTestId("timeline-scroll").querySelector("[data-current-step]")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
+    expect(screen.queryByTestId("running-trail")).not.toBeInTheDocument();
+    expect(screen.getByText("Approval")).toBeInTheDocument();
+  });
+
+  it("renders a branching dependency graph with exact edge and write semantics", () => {
+    const actions = dependencyActions();
+    render(
+      <PlanDependencyGraph
+        actions={actions}
+        runStatus="waiting_approval"
+        selectedActionId={null}
+        onSelectAction={vi.fn()}
+      />,
+    );
+
+    expect(screen.getAllByTestId("dependency-edge")).toHaveLength(3);
+    expect(screen.getByTestId("graph-node-event").className).toContain("graphNodeWrite");
+    expect(screen.getByTestId("graph-node-task").className).toContain("graphNodeApproval");
+    expect(screen.getByTestId("graph-node-thread")).toHaveAttribute("data-action-id", "thread");
+    expect(
+      screen.getAllByLabelText(/Create task.*Depends on Read grounded thread/i).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("keeps independent graph nodes free of decorative dependency edges", () => {
+    const actions = dependencyActions().slice(0, 2).map((action) => ({
+      ...action,
+      depends_on: [],
+    }));
+    render(
+      <PlanDependencyGraph
+        actions={actions}
+        runStatus="completed"
+        selectedActionId={null}
+        onSelectAction={vi.fn()}
+      />,
+    );
+    expect(screen.queryAllByTestId("dependency-edge")).toHaveLength(0);
+    expect(screen.getAllByText("Starts independently").length).toBeGreaterThan(0);
+  });
+
+  it("synchronizes dependency-node identity with the Sequence and Dependencies views", async () => {
+    const actions = dependencyActions();
+    render(
+      <PlanPanel
+        run={makeRun({ plan: actions })}
+        busy={false}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onEdit={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("group", { name: "Plan dependency graph" })).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("graph-node-task"));
+    expect(screen.getByTestId("graph-node-task").className).toContain("graphNodeSelected");
+    await userEvent.click(screen.getByRole("button", { name: /sequence/i }));
+    expect(document.querySelector('[data-action-id="task"]')).toHaveAttribute("aria-pressed", "true");
+    await userEvent.click(screen.getByRole("button", { name: /dependencies/i }));
+    expect(screen.getByTestId("graph-node-task")).toBeInTheDocument();
+  });
+
+  it("shows a meaningful completed-run dependency graph outside Executed actions", () => {
+    render(
+      <PlanPanel
+        run={completedDependencyRun()}
+        busy={false}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onEdit={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "How the actions connect" })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Plan dependency graph" })).toBeInTheDocument();
+    expect(screen.getByTestId("graph-node-event")).toBeInTheDocument();
+    const executed = screen.getByText("Executed actions").closest("details");
+    expect(executed).not.toHaveAttribute("open");
+  });
+
+  it("keeps the completed-run graph visible when Executed actions is collapsed", async () => {
+    render(
+      <PlanPanel
+        run={completedDependencyRun()}
+        busy={false}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onEdit={vi.fn()}
+      />,
+    );
+
+    const executedSummary = screen.getByText("Executed actions");
+    fireEvent.click(executedSummary);
+    await waitFor(() => expect(executedSummary.closest("details")).toHaveAttribute("open"));
+    fireEvent.click(executedSummary);
+    await waitFor(() => expect(executedSummary.closest("details")).not.toHaveAttribute("open"));
+    expect(screen.getByRole("group", { name: "Plan dependency graph" })).toBeInTheDocument();
+    expect(screen.getByTestId("graph-node-task")).toBeInTheDocument();
+  });
+
+  it("defaults reopened completed plans to Dependencies while keeping Sequence available", async () => {
+    const view = render(
+      <PlanPanel
+        run={completedDependencyRun()}
+        busy={false}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onEdit={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Dependencies" })).toHaveAttribute("aria-pressed", "true");
+    await userEvent.click(screen.getByRole("button", { name: "Sequence" }));
+    expect(screen.queryByRole("group", { name: "Plan dependency graph" })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("graph-node-task")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Dependencies" }));
+    expect(screen.getByRole("group", { name: "Plan dependency graph" })).toBeInTheDocument();
+
+    view.unmount();
+    render(
+      <PlanPanel
+        run={completedDependencyRun({ id: "reopened-completed-run" })}
+        busy={false}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onEdit={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("group", { name: "Plan dependency graph" })).toBeInTheDocument();
+  });
+
+  it("keeps trivial and dependency-free historical plans in the compact sequence disclosure", () => {
+    const trivial = render(
+      <PlanPanel
+        run={completedDependencyRun({ id: "trivial-completed", plan: dependencyActions().slice(0, 1) })}
+        busy={false}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onEdit={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole("heading", { name: "How the actions connect" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Plan dependency graph" })).not.toBeInTheDocument();
+
+    trivial.unmount();
+    render(
+      <PlanPanel
+        run={completedDependencyRun({
+          id: "legacy-completed",
+          plan: dependencyActions().map((action) => ({ ...action, depends_on: [] })),
+        })}
+        busy={false}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onEdit={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole("heading", { name: "How the actions connect" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Plan dependency graph" })).not.toBeInTheDocument();
+    expect(screen.getByText("Executed actions")).toBeInTheDocument();
+  });
+
+  it("does not render an empty graph when a run failed before plan generation", () => {
+    render(
+      <PlanPanel
+        run={completedDependencyRun({ id: "failed-before-plan", status: "failed", plan: [], error: "The run failed before a plan was generated." })}
+        busy={false}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onEdit={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("No executable plan was produced for this run.")).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Plan dependency graph" })).not.toBeInTheDocument();
+  });
+
+  it("falls back safely when dependency data is invalid", () => {
+    const actions = dependencyActions().slice(0, 2);
+    actions[1] = { ...actions[1], depends_on: ["missing-action"] };
+    render(
+      <PlanDependencyGraph
+        actions={actions}
+        runStatus="running"
+        selectedActionId={null}
+        onSelectAction={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("Dependency view unavailable");
+    expect(screen.queryByTestId("dependency-edge")).not.toBeInTheDocument();
+  });
+
+  it("keeps a one-action plan in the simple sequence view", () => {
+    render(
+      <PlanPanel
+        run={makeRun({ plan: dependencyActions().slice(0, 1) })}
+        busy={false}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onEdit={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole("group", { name: "Plan view" })).not.toBeInTheDocument();
+    expect(screen.getByText("Search interview mail")).toBeInTheDocument();
+  });
+
+  it("shows the rail-integrated running trail only for a genuinely live run", () => {
+    const running = render(
+      <TimelinePanel runId="run-trail" runStatus="running" events={timelineEvents(4)} />,
+    );
+    expect(screen.getByTestId("running-trail")).toBeInTheDocument();
+    expect(screen.getAllByText("Workflow step 4", { selector: "strong" }).length).toBeGreaterThan(0);
+
+    running.rerender(
+      <TimelinePanel runId="run-trail" runStatus="completed" events={timelineEvents(4)} />,
+    );
+    expect(screen.queryByTestId("running-trail")).not.toBeInTheDocument();
+    expect(screen.getByText("Complete")).toBeInTheDocument();
+  });
+
+  it("follows new live events while the user stays at the latest step", () => {
+    const scrollTo = mockTimelineScroll();
+    const view = render(
+      <TimelinePanel runId="run-live" runStatus="running" events={timelineEvents(2)} />,
+    );
+    const initialCalls = scrollTo.mock.calls.length;
+    expect(initialCalls).toBeGreaterThan(0);
+    expect(screen.getByText("Running")).toBeInTheDocument();
+
+    view.rerender(
+      <TimelinePanel runId="run-live" runStatus="running" events={timelineEvents(3)} />,
+    );
+    expect(scrollTo.mock.calls.length).toBeGreaterThan(initialCalls);
+    const afterFirstEvent = scrollTo.mock.calls.length;
+
+    view.rerender(
+      <TimelinePanel runId="run-live" runStatus="running" events={timelineEvents(4)} />,
+    );
+    expect(scrollTo.mock.calls.length).toBeGreaterThan(afterFirstEvent);
+    expect(screen.getByTestId("timeline-scroll")).toHaveAttribute("data-follow-live", "true");
+  });
+
+  it("respects history inspection and restores follow mode with Jump to latest", () => {
+    const scrollTo = mockTimelineScroll();
+    const view = render(
+      <TimelinePanel runId="run-history" runStatus="running" events={timelineEvents(5)} />,
+    );
+    const timeline = screen.getByTestId("timeline-scroll");
+    setTimelineMetrics(timeline, { scrollTop: 120, scrollHeight: 1_000, clientHeight: 300 });
+    fireEvent.wheel(timeline);
+    fireEvent.scroll(timeline);
+
+    expect(screen.getByRole("button", { name: /follow live/i })).toBeInTheDocument();
+    expect(timeline).toHaveAttribute("data-follow-live", "false");
+    const callsBeforeNewEvent = scrollTo.mock.calls.length;
+
+    view.rerender(
+      <TimelinePanel runId="run-history" runStatus="running" events={timelineEvents(6)} />,
+    );
+    expect(scrollTo).toHaveBeenCalledTimes(callsBeforeNewEvent);
+    expect(screen.getByRole("button", { name: /follow live/i })).toHaveTextContent("1 new");
+
+    fireEvent.click(screen.getByRole("button", { name: /follow live/i }));
+    expect(scrollTo.mock.calls.length).toBeGreaterThan(callsBeforeNewEvent);
+    expect(screen.queryByRole("button", { name: /follow live/i })).not.toBeInTheDocument();
+    expect(timeline).toHaveAttribute("data-follow-live", "true");
+  });
+
+  it("re-enables follow mode when the user returns near the bottom", () => {
+    mockTimelineScroll();
+    render(<TimelinePanel runId="run-near-bottom" runStatus="running" events={timelineEvents(5)} />);
+    const timeline = screen.getByTestId("timeline-scroll");
+    setTimelineMetrics(timeline, { scrollTop: 100, scrollHeight: 1_000, clientHeight: 300 });
+    fireEvent.wheel(timeline);
+    fireEvent.scroll(timeline);
+    expect(screen.getByRole("button", { name: /follow live/i })).toBeInTheDocument();
+
+    setTimelineMetrics(timeline, { scrollTop: 650, scrollHeight: 1_000, clientHeight: 300 });
+    fireEvent.scroll(timeline);
+    expect(screen.queryByRole("button", { name: /follow live/i })).not.toBeInTheDocument();
+    expect(timeline).toHaveAttribute("data-follow-live", "true");
+  });
+
+  it("does not auto-scroll completed runs and initializes a switched live run at latest", () => {
+    const scrollTo = mockTimelineScroll();
+    const view = render(
+      <TimelinePanel runId="run-complete" runStatus="completed" events={timelineEvents(4)} />,
+    );
+    expect(scrollTo).not.toHaveBeenCalled();
+
+    view.rerender(
+      <TimelinePanel runId="run-complete" runStatus="completed" events={timelineEvents(5)} />,
+    );
+    expect(scrollTo).not.toHaveBeenCalled();
+
+    view.rerender(
+      <TimelinePanel runId="run-next" runStatus="running" events={timelineEvents(2)} />,
+    );
+    expect(scrollTo).toHaveBeenCalled();
+  });
+
+  it("uses non-animated timeline scrolling when reduced motion is requested", () => {
+    const scrollTo = mockTimelineScroll();
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: true }));
+    render(<TimelinePanel runId="run-reduced" runStatus="running" events={timelineEvents(5)} />);
+    const timeline = screen.getByTestId("timeline-scroll");
+    setTimelineMetrics(timeline, { scrollTop: 100, scrollHeight: 1_000, clientHeight: 300 });
+    fireEvent.wheel(timeline);
+    fireEvent.scroll(timeline);
+    fireEvent.click(screen.getByRole("button", { name: /follow live/i }));
+
+    expect(scrollTo.mock.calls.at(-1)?.[0]).toMatchObject({ behavior: "auto" });
+    vi.unstubAllGlobals();
   });
 
   it("expands discovered MCP tools and shows risk classifications", () => {
@@ -467,7 +1095,7 @@ describe("DayPilot operations workspace", () => {
       />,
     );
     await waitFor(() => expect(screen.getByText("Revision 2")).toBeInTheDocument());
-    expect(screen.getByText("Create exactly two preparation tasks")).toBeInTheDocument();
+    expect(screen.getAllByText("Create exactly two preparation tasks").length).toBeGreaterThan(0);
     expect(screen.getByRole("button", { name: /approve & execute/i })).toBeInTheDocument();
   });
 
@@ -485,6 +1113,19 @@ describe("DayPilot operations workspace", () => {
       feedback: "Create exactly two tasks",
       plan_revision: 1,
     });
+    vi.unstubAllGlobals();
+  });
+
+  it("loads enough run history to keep older pending approvals reachable", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => [] });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await listRuns();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("/api/runs?limit=100"),
+      expect.any(Object),
+    );
     vi.unstubAllGlobals();
   });
 

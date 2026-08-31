@@ -1,27 +1,23 @@
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from mcp_servers.common.database import database_path_from_env
-from mcp_servers.common.store import DemoServiceStore
+from backend.app.config import Settings
+from backend.app.providers.factory import build_dynamic_service
 
 mcp = FastMCP(
     "DayPilot Mail",
     instructions=(
-        "Fictional local mailbox. Read tools expose grounded mail facts; "
+        "Mail capability selected by DayPilot configuration. Read tools expose grounded facts; "
         "create_draft saves but never sends."
     ),
     log_level="ERROR",
     json_response=True,
 )
-store = DemoServiceStore(
-    database_path_from_env(),
-    os.getenv("DAYPILOT_TIMEZONE", "Asia/Kolkata"),
-)
+store = build_dynamic_service("mail", Settings())
 read_annotations = ToolAnnotations(
     readOnlyHint=True,
     destructiveHint=False,
@@ -38,7 +34,7 @@ write_annotations = ToolAnnotations(
 
 @mcp.tool(annotations=read_annotations)
 def search_mail(query: str, limit: int = 10) -> dict[str, Any]:
-    """Search the demo mailbox by person, subject, or body text. This is read-only."""
+    """Search the connected mailbox by person, subject, or body text. This is read-only."""
     return store.search_mail(query, limit)
 
 

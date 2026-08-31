@@ -4,30 +4,14 @@
   overflow: visible;
 }
 
-.route { fill: #6ea0ff; }
-.routeLower, .executionBody { display: none; }
-.decision { fill: #f1f4fb; }
-
-.logoActive .routeUpper { animation: signalFlow 1.65s ease-in-out infinite; }
-.logoActive .executionBody { animation: executionFlow 1.65s .38s ease-in-out infinite; }
-
-.logoMonochrome .route,
-.logoMonochrome .executionBody,
-.logoMonochrome .decision { fill: currentColor; }
+.logoActive .mark { animation: signalFlow 1.65s ease-in-out infinite; }
+.logoMonochrome .mark { fill: currentColor; animation: none; }
 
 @keyframes signalFlow {
-  0%, 100% { fill: #6ea0ff; }
-  40% { fill: #a5c2ff; }
-}
-
-@keyframes executionFlow {
-  0%, 100% { fill: #3f7bf2; }
-  44% { fill: #74a2ff; }
+  0%, 100% { fill: #3b82f6; }
+  40% { fill: #6ea0ff; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .logoActive .routeUpper,
-  .logoActive .routeLower,
-  .logoActive .executionBody { animation: none; }
-  .logoActive .executionBody { fill: #74a2ff; }
+  .logoActive .mark { animation: none; }
 }

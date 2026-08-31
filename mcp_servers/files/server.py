@@ -1,27 +1,24 @@
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from mcp_servers.common.database import database_path_from_env
-from mcp_servers.common.store import DemoServiceStore
+from backend.app.config import Settings
+from backend.app.providers.factory import build_dynamic_service
 
 mcp = FastMCP(
     "DayPilot Files",
     instructions=(
-        "Controlled fictional workspace documents. File IDs are service-owned references; "
-        "the server never exposes arbitrary host filesystem paths. All tools are read-only."
+        "Read-only Files capability selected by DayPilot configuration. "
+        "File IDs are service-owned references; "
+        "the server never exposes arbitrary host filesystem paths."
     ),
     log_level="ERROR",
     json_response=True,
 )
-store = DemoServiceStore(
-    database_path_from_env(),
-    os.getenv("DAYPILOT_TIMEZONE", "Asia/Kolkata"),
-)
+store = build_dynamic_service("files", Settings())
 read_annotations = ToolAnnotations(
     readOnlyHint=True,
     destructiveHint=False,

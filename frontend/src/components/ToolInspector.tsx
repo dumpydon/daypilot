@@ -54,7 +54,7 @@ export function ToolInspector({
       className={`${styles.toolsPanel} ${styles.inspector} ${open ? styles.inspectorOpen : ""}`}
     >
       <div className={styles.inspectorHeader}>
-        <div><span className={styles.eyebrow}>Connected tools</span><h2>Connected capabilities</h2><small>{connected} MCP servers · {totalTools} tools</small></div>
+        <div><span className={styles.eyebrow}>Tools</span><h2>Connected capabilities</h2><small>{connected} MCP servers · {totalTools} tools</small></div>
         <button
           type="button"
           className={styles.inspectorToggle}
@@ -70,6 +70,18 @@ export function ToolInspector({
         {catalog.servers.map((server) => {
           const Icon = icons[server.name as keyof typeof icons] ?? PlugZap;
           const isOpen = expanded === server.name;
+          const providerConnected = server.connected && (server.provider_state
+            ? server.provider_state === "connected"
+            : true);
+          const provider = server.provider ?? "DayPilot demo";
+          const modeLabel = server.connection_mode === "managed"
+            ? "Managed"
+            : server.connection_mode === "direct"
+              ? "Direct"
+              : null;
+          const providerLabel = modeLabel ? `${provider} · ${modeLabel}` : provider;
+          const requiresReconnect = server.provider_state === "error"
+            || server.provider_state === "reconnect_required";
           return (
             <div className={styles.server} key={server.name}>
               <button
@@ -79,7 +91,7 @@ export function ToolInspector({
                 onClick={() => setExpandedServer(isOpen ? null : server.name)}
               >
                 <span className={styles.serverIcon}><Icon size={13} /></span>
-                <span><strong>{title(server.name)} MCP</strong><small><i className={server.connected ? styles.okDot : styles.errorDot} />{server.connected ? `Connected · ${server.tool_count} tools` : "Disconnected"}</small></span>
+                <span><strong>{title(server.name)} MCP</strong><small><i className={providerConnected ? styles.okDot : styles.errorDot} />{providerLabel} · {providerConnected ? `Connected · ${server.tool_count} tools` : server.provider_state === "connecting" ? "Connecting" : server.provider_state === "unavailable" ? "Unavailable" : requiresReconnect ? "Reconnect required" : "Not connected"}</small></span>
                 <ChevronDown size={13} className={isOpen ? styles.chevronOpen : ""} />
               </button>
               {isOpen && <div className={styles.toolList} id={`tools-${server.name}`}>{catalog.tools.filter((tool) => tool.server_name === server.name).map((tool) => <div key={tool.name}><code>{tool.name}</code><span className={tool.side_effecting ? styles.write : styles.read}>{tool.side_effecting ? "Write" : "Read"}</span></div>)}</div>}

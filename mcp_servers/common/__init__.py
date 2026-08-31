@@ -1,1 +1,1 @@
-"""Shared demo service persistence."""
+"""Shared DayPilot service persistence and schema helpers."""

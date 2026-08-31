@@ -31,8 +31,28 @@ export function CapabilityStrip({ catalog, selectedServer, onSelect }: Capabilit
       {capabilities.map(({ serverName, label, description, Icon }) => {
         const server = catalog.servers.find((candidate) => candidate.name === serverName);
         const connected = server?.connected ?? false;
+        const providerConnected = connected && (server?.provider_state
+          ? server.provider_state === "connected"
+          : true);
         const toolCount = server?.tool_count ?? 0;
-        const status = connected ? "Connected" : "Disconnected";
+        const requiresReconnect = server?.provider_state === "error"
+          || server?.provider_state === "reconnect_required";
+        const status = providerConnected
+          ? "Connected"
+          : server?.provider_state === "connecting"
+            ? "Connecting"
+            : server?.provider_state === "unavailable"
+              ? "Unavailable"
+            : requiresReconnect
+              ? "Reconnect required"
+              : "Disconnected";
+        const provider = server?.provider ?? "DayPilot demo";
+        const modeLabel = server?.connection_mode === "managed"
+          ? "Managed"
+          : server?.connection_mode === "direct"
+            ? "Direct"
+            : null;
+        const providerLabel = modeLabel ? `${provider} · ${modeLabel}` : provider;
         const selected = selectedServer === serverName;
 
         return (
@@ -41,7 +61,7 @@ export function CapabilityStrip({ catalog, selectedServer, onSelect }: Capabilit
             key={serverName}
             className={`${styles.capabilityCard} ${selected ? styles.capabilityCardSelected : ""}`}
             aria-pressed={selected}
-            aria-label={`${label} capability, ${status}, ${toolCount} tools`}
+            aria-label={`${label} capability, ${providerLabel}, ${status}, ${toolCount} tools`}
             data-testid={`capability-card-${serverName}`}
             onClick={() => onSelect(serverName)}
           >
@@ -49,8 +69,9 @@ export function CapabilityStrip({ catalog, selectedServer, onSelect }: Capabilit
             <span className={styles.capabilityCardCopy}>
               <strong>{label}</strong>
               <span>{description}</span>
+              <small className={styles.capabilityCardProvider}>{providerLabel}</small>
             </span>
-            <span className={`${styles.capabilityCardMeta} ${connected ? styles.capabilityConnected : styles.capabilityDisconnected}`} title={status}>
+            <span className={`${styles.capabilityCardMeta} ${providerConnected ? styles.capabilityConnected : styles.capabilityDisconnected}`} title={status}>
               <i aria-hidden="true" />
               {toolCount} tools
             </span>

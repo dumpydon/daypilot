@@ -1,35 +1,128 @@
-import { Check, Circle, Info, LoaderCircle, ShieldAlert, X } from "lucide-react";
+import { ArrowDown, Check, Circle, Info, ShieldAlert, X } from "lucide-react";
 import { useMemo, useState } from "react";
 
-import type { TimelineEvent } from "@/lib/types";
+import type { RunStatus, TimelineEvent } from "@/lib/types";
 
+import { useFollowTimeline } from "./useFollowTimeline";
 import styles from "./workspace.module.css";
 
-export function TimelinePanel({ events }: { events: TimelineEvent[] }) {
+interface TimelinePanelProps {
+  events: TimelineEvent[];
+  runId?: string;
+  runStatus?: RunStatus;
+}
+
+export function TimelinePanel({ events, runId, runStatus }: TimelinePanelProps) {
   const [showDetails, setShowDetails] = useState(false);
   const groupedEvents = useMemo(() => groupEvents(events), [events]);
+  const effectiveStatus = runStatus ?? inferredStatus(groupedEvents);
+  const isLive = ["queued", "running", "resuming"].includes(effectiveStatus);
+  const resolvedRunId = runId ?? groupedEvents.at(-1)?.run_id ?? "timeline";
+  const latest = groupedEvents.at(-1);
+  const currentIndex = currentEventIndex(groupedEvents, effectiveStatus);
+  const currentEvent = currentIndex >= 0 ? groupedEvents[currentIndex] : latest;
+  const {
+    containerRef,
+    following,
+    newEvents,
+    showJumpToLatest,
+    onScroll,
+    markUserScrollIntent,
+    jumpToLatest,
+  } = useFollowTimeline({
+    runId: resolvedRunId,
+    itemKey: latest ? `${latest.id}-${latest.event_type}-${latest.state}` : "empty",
+    itemCount: groupedEvents.length,
+    isLive,
+    startAtLatest: isLive || effectiveStatus === "waiting_approval",
+  });
+
   return (
     <aside className={styles.timelinePanel}>
-      <div className={styles.sectionHeader}>
-        <div><span className={styles.eyebrow}>Workflow</span><h2>Live timeline</h2></div>
-        <button className={styles.sectionAction} onClick={() => setShowDetails((value) => !value)} aria-pressed={showDetails}>
-          <Info size={13} />{showDetails ? "Less detail" : "Details"}
-        </button>
+      <div className={`${styles.sectionHeader} ${styles.timelineHeader}`}>
+        <div className={styles.timelineTitle}>
+          <span>Activity</span>
+          <h2>Live timeline</h2>
+        </div>
+        <div className={styles.timelineHeaderActions}>
+          {showJumpToLatest && (
+            <button className={styles.jumpLatest} type="button" onClick={jumpToLatest}>
+              <ArrowDown size={13} />
+              <span>Follow live</span>
+              {newEvents > 0 && <b>{newEvents} new</b>}
+            </button>
+          )}
+          <span className={`${styles.timelineStatus} ${styles[`timelineStatus_${effectiveStatus}`]}`}>
+            <i />{timelineStatusLabel(effectiveStatus)}
+          </span>
+          <button
+            className={styles.sectionAction}
+            onClick={() => setShowDetails((value) => !value)}
+            aria-pressed={showDetails}
+          >
+            <Info size={14} />{showDetails ? "Less" : "Details"}
+          </button>
+        </div>
       </div>
-      <div className={styles.timeline}>
-        {groupedEvents.length === 0 ? <p className={styles.emptyTimeline}>The workflow is starting…</p> : groupedEvents.map((event, index) => (
-          <div className={`${styles.timelineItem} ${styles[event.state]}`} key={event.id}>
-            <div className={styles.timelineTrack}>
-              <span>{eventIcon(event)}</span>
-              {index < groupedEvents.length - 1 && <i />}
-            </div>
-            <div className={styles.timelineContent}>
-              <strong>{event.title}</strong>
-              {(showDetails || isImportant(event)) && event.detail && <p>{event.detail}</p>}
-              <small>{formatEventTime(event.created_at)} · {prettyEvent(event.event_type)}</small>
-            </div>
+      {currentEvent && (
+        <div className={`${styles.timelineNow} ${isLive ? styles.timelineNowLive : ""}`} aria-live="polite">
+          <span />
+          <strong>{currentEvent.title}</strong>
+        </div>
+      )}
+      <div className={styles.timelineShell}>
+        <div
+          className={styles.timelineViewport}
+          ref={containerRef}
+          data-testid="timeline-scroll"
+          data-follow-live={following ? "true" : "false"}
+          onScroll={onScroll}
+          onWheel={markUserScrollIntent}
+          onTouchStart={markUserScrollIntent}
+          onKeyDown={markUserScrollIntent}
+          tabIndex={0}
+          aria-label="Workflow timeline events"
+        >
+          <div className={styles.timeline}>
+            {groupedEvents.length === 0 ? (
+              <p className={styles.emptyTimeline}>The workflow is starting…</p>
+            ) : groupedEvents.map((event, index) => {
+              const current = index === currentIndex;
+              const visualState = !isLive && event.state === "running"
+                ? "completed"
+                : event.state;
+              return (
+                <div
+                  className={`${styles.timelineItem} ${styles[visualState]} ${current ? styles.timelineCurrent : ""}`}
+                  key={event.id}
+                  aria-current={current ? "step" : undefined}
+                  data-current-step={current ? "true" : "false"}
+                >
+                  <div className={styles.timelineTrack}>
+                    <span>{eventIcon(visualState)}</span>
+                    {index < groupedEvents.length - 1 && <i />}
+                    {current && isLive && (
+                      <b className={styles.runningTrail} aria-hidden="true" data-testid="running-trail">
+                        <i /><i /><i />
+                      </b>
+                    )}
+                  </div>
+                  <div className={styles.timelineContent}>
+                    <strong>{event.title}</strong>
+                    {(showDetails || isImportant(event)) && event.detail && <p>{event.detail}</p>}
+                    <small>
+                      <time>{formatEventTime(event.created_at)}</time>
+                      {showDetails && <span>{prettyEvent(event.event_type)}</span>}
+                    </small>
+                  </div>
+                </div>
+              );
+            })}
           </div>
-        ))}
+        </div>
+        <span className={styles.srOnly} aria-live="polite">
+          {newEvents > 0 ? `${newEvents} new workflow events` : ""}
+        </span>
       </div>
     </aside>
   );
@@ -54,12 +147,31 @@ function isImportant(event: TimelineEvent) {
   return event.state === "failed" || ["approval_required", "plan_revised", "plan_generated", "run_completed", "request_understood"].includes(event.event_type);
 }
 
-function eventIcon(event: TimelineEvent) {
-  if (event.state === "failed") return <X size={10} />;
-  if (event.state === "waiting_for_approval") return <ShieldAlert size={10} />;
-  if (event.state === "running") return <LoaderCircle size={10} className={styles.spin} />;
-  if (event.state === "completed") return <Check size={10} />;
+function inferredStatus(events: TimelineEvent[]): RunStatus {
+  if (events.some((event) => event.state === "waiting_for_approval")) return "waiting_approval";
+  if (events.some((event) => event.state === "running")) return "running";
+  return "completed";
+}
+
+function currentEventIndex(events: TimelineEvent[], runStatus: RunStatus) {
+  if (["completed", "failed", "rejected"].includes(runStatus)) return -1;
+  return events.length - 1;
+}
+
+function eventIcon(state: TimelineEvent["state"]) {
+  if (state === "failed") return <X size={10} />;
+  if (state === "waiting_for_approval") return <ShieldAlert size={10} />;
+  if (state === "running") return <Circle size={8} fill="currentColor" />;
+  if (state === "completed") return <Check size={10} />;
   return <Circle size={8} />;
+}
+
+function timelineStatusLabel(status: RunStatus) {
+  if (["queued", "running", "resuming"].includes(status)) return "Running";
+  if (status === "waiting_approval") return "Approval";
+  if (status === "failed") return "Failed";
+  if (status === "rejected") return "Rejected";
+  return "Complete";
 }
 
 function formatEventTime(value: string) {

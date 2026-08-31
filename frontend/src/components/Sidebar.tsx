@@ -1,4 +1,4 @@
-import { History, PanelLeftClose, PanelLeftOpen, Plus, Settings2, X } from "lucide-react";
+import { History, PanelLeftClose, PanelLeftOpen, Plus, Settings, WandSparkles, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import type { Preferences, RunRecord } from "@/lib/types";
@@ -70,7 +70,7 @@ export function Sidebar({
       <aside className={`${styles.sidebar} ${collapsed ? styles.sidebarCollapsed : ""} ${mobileOpen ? styles.sidebarOpen : ""}`}>
         <div className={styles.sidebarTop}>
           <button className={styles.newRun} onClick={() => { onNew(); onCloseMobile(); }} aria-label="New run">
-            <Plus size={15} />
+            <Plus className={styles.newRunIcon} size={18} strokeWidth={1.9} />
             {!collapsed && <span>New run</span>}
           </button>
           <button
@@ -79,13 +79,13 @@ export function Sidebar({
             aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
             title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
           >
-            {mobileOpen ? <X size={15} /> : collapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
+            {mobileOpen ? <X size={18} strokeWidth={1.9} /> : collapsed ? <PanelLeftOpen size={18} strokeWidth={1.9} /> : <PanelLeftClose size={18} strokeWidth={1.9} />}
           </button>
         </div>
 
         {!collapsed ? (
           <div className={styles.sideSection}>
-            <p className={styles.eyebrow}><History size={12} /> Recent runs</p>
+            <p className={styles.eyebrow}><History size={12} /> Recent runs History</p>
             {runs.length === 0 ? (
               <p className={styles.emptyHistory}>Completed and interrupted runs will appear here.</p>
             ) : runs.map((run) => (
@@ -107,7 +107,7 @@ export function Sidebar({
             ))}
           </div>
         ) : (
-          <div className={styles.collapsedRuns} aria-label="Recent runs">
+          <div className={styles.collapsedRuns} aria-label="Recent runs History">
             {runs.slice(0, 8).map((run) => (
               <button
                 className={`${styles.collapsedRun} ${activeRunId === run.id ? styles.selected : ""}`}
@@ -126,15 +126,29 @@ export function Sidebar({
           {!collapsed ? (
             <>
               <div className={styles.preferencesTitle}>
-                <p className={styles.eyebrow}>Preferences applied</p>
-                <button aria-label="Edit preferences" onClick={onPreferences}><Settings2 size={14} /></button>
+                <p className={styles.eyebrow}>Preferences and settings and more</p>
+                <button
+                  className={styles.preferencesTrigger}
+                  aria-label="Open preferences"
+                  title="Preferences"
+                  onClick={onPreferences}
+                >
+                  <WandSparkles size={17} strokeWidth={1.9} />
+                  <Settings size={17} strokeWidth={1.9} />
+                </button>
               </div>
               <div><span>Focus block</span><strong>{preferences.preferred_focus_block_minutes} min</strong></div>
               <div><span>Avoid after</span><strong>{formatTime(preferences.avoid_scheduling_after)}</strong></div>
             </>
           ) : (
-            <button className={styles.collapsedSettings} onClick={onPreferences} aria-label="Edit preferences" title="Edit preferences">
-              <Settings2 size={15} />
+            <button
+              className={`${styles.collapsedSettings} ${styles.preferencesTrigger}`}
+              onClick={onPreferences}
+              aria-label="Open preferences"
+              title="Preferences"
+            >
+              <WandSparkles size={16} strokeWidth={1.9} />
+              <Settings size={16} strokeWidth={1.9} />
             </button>
           )}
         </div>

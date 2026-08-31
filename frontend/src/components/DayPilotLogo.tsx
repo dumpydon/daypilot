@@ -1,6 +1,6 @@
 import type { SVGProps } from "react";
 
-import { DAYPILOT_MARK_PATHS, DAYPILOT_MARK_VIEWBOX } from "./daypilotMarkGeometry";
+import { DAYPILOT_MARK_COLOR, DAYPILOT_MARK_PATHS, DAYPILOT_MARK_VIEWBOX } from "./daypilotMarkGeometry";
 import styles from "./daypilot-logo.module.css";
 
 interface DayPilotLogoProps extends Omit<SVGProps<SVGSVGElement>, "viewBox"> {
@@ -9,7 +9,7 @@ interface DayPilotLogoProps extends Omit<SVGProps<SVGSVGElement>, "viewBox"> {
   size?: number;
 }
 
-/** Canonical DayPilot mark: two routed trajectories crossing a controlled decision aperture. */
+/** Approved D/P monogram, shared with the app icon through canonical geometry. */
 export function DayPilotLogo({ active = false, monochrome = false, size = 34, className, ...props }: DayPilotLogoProps) {
   return (
     <svg
@@ -22,10 +22,10 @@ export function DayPilotLogo({ active = false, monochrome = false, size = 34, cl
       aria-label={props["aria-label"] ?? "DayPilot logo"}
       focusable="false"
     >
-      <path className={`${styles.route} ${styles.routeUpper}`} d={DAYPILOT_MARK_PATHS.upperRoute} fillRule="evenodd" />
-      <path className={`${styles.route} ${styles.routeLower}`} d={DAYPILOT_MARK_PATHS.lowerRoute} />
-      <path className={styles.executionBody} d={DAYPILOT_MARK_PATHS.executionBody} />
-      <path className={styles.decision} d={DAYPILOT_MARK_PATHS.decision} />
+      <g className={styles.mark} fill={monochrome ? "currentColor" : DAYPILOT_MARK_COLOR}>
+        <path d={DAYPILOT_MARK_PATHS.shell} />
+        <path d={DAYPILOT_MARK_PATHS.stem} />
+      </g>
     </svg>
   );
 }

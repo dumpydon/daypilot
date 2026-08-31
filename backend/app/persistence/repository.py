@@ -13,6 +13,7 @@ from backend.app.domain.errors import RunConflictError, RunNotFoundError
 from backend.app.domain.models import (
     ApprovalStatus,
     EventState,
+    FileRoot,
     PlanAction,
     PreferenceSet,
     RunRecord,
@@ -71,6 +72,41 @@ CREATE TABLE IF NOT EXISTS preferences (
     preferred_focus_block_minutes INTEGER NOT NULL,
     avoid_scheduling_after TEXT NOT NULL,
     preferred_task_due_time TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS provider_modes (
+    service TEXT PRIMARY KEY,
+    mode TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS file_roots (
+    id TEXT PRIMARY KEY,
+    path TEXT NOT NULL UNIQUE,
+    label TEXT NOT NULL,
+    added_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS installation_identity (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    user_id TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS managed_sessions (
+    provider TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS managed_accounts (
+    toolkit TEXT PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    account_label TEXT,
+    last_error TEXT,
     updated_at TEXT NOT NULL
 );
 """
@@ -153,6 +189,161 @@ class DayPilotRepository:
             rows = await cursor.fetchall()
         return [self._run_record(dict(row)) for row in rows]
 
+    async def ensure_provider_modes(self, modes: dict[str, str]) -> None:
+        allowed = {"mail", "calendar", "tasks", "files", "x"}
+        if set(modes) != allowed:
+            raise ValueError("Provider mode defaults must cover every DayPilot service")
+        timestamp = _now()
+        async with self._connect() as connection:
+            await connection.executemany(
+                """
+                INSERT OR IGNORE INTO provider_modes(service, mode, updated_at)
+                VALUES (?, ?, ?)
+                """,
+                [(service, mode, timestamp) for service, mode in modes.items()],
+            )
+            await connection.commit()
+
+    async def list_provider_modes(self) -> dict[str, str]:
+        async with self._connect() as connection:
+            cursor = await connection.execute("SELECT service, mode FROM provider_modes")
+            rows = await cursor.fetchall()
+        return {row["service"]: row["mode"] for row in rows}
+
+    async def set_provider_mode(self, service: str, mode: str) -> None:
+        if service not in {"mail", "calendar", "tasks", "files", "x"}:
+            raise ValueError(f"Unknown provider service {service!r}")
+        async with self._connect() as connection:
+            await connection.execute(
+                """
+                INSERT INTO provider_modes(service, mode, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(service) DO UPDATE SET
+                    mode = excluded.mode,
+                    updated_at = excluded.updated_at
+                """,
+                (service, mode, _now()),
+            )
+            await connection.commit()
+
+    async def get_installation_user_id(self) -> str | None:
+        async with self._connect() as connection:
+            row = await self._fetchone(
+                connection,
+                "SELECT user_id FROM installation_identity WHERE id = 1",
+            )
+        return str(row["user_id"]) if row else None
+
+    async def set_installation_user_id(self, user_id: str) -> None:
+        async with self._connect() as connection:
+            await connection.execute(
+                """
+                INSERT INTO installation_identity(id, user_id, created_at)
+                VALUES (1, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET user_id = excluded.user_id
+                """,
+                (user_id, _now()),
+            )
+            await connection.commit()
+
+    async def get_managed_session(self, provider: str = "composio") -> dict[str, str] | None:
+        async with self._connect() as connection:
+            row = await self._fetchone(
+                connection,
+                "SELECT provider, session_id, user_id, updated_at FROM managed_sessions "
+                "WHERE provider = ?",
+                (provider,),
+            )
+        return row
+
+    async def set_managed_session(
+        self,
+        session_id: str,
+        user_id: str,
+        provider: str = "composio",
+    ) -> None:
+        async with self._connect() as connection:
+            await connection.execute(
+                """
+                INSERT INTO managed_sessions(provider, session_id, user_id, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(provider) DO UPDATE SET
+                    session_id = excluded.session_id,
+                    user_id = excluded.user_id,
+                    updated_at = excluded.updated_at
+                """,
+                (provider, session_id, user_id, _now()),
+            )
+            await connection.commit()
+
+    async def delete_managed_session(self, provider: str = "composio") -> None:
+        async with self._connect() as connection:
+            await connection.execute("DELETE FROM managed_sessions WHERE provider = ?", (provider,))
+            await connection.commit()
+
+    async def list_managed_accounts(self) -> list[dict[str, Any]]:
+        async with self._connect() as connection:
+            cursor = await connection.execute("SELECT * FROM managed_accounts ORDER BY toolkit")
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def set_managed_account(
+        self,
+        toolkit: str,
+        account_id: str,
+        status: str,
+        account_label: str | None = None,
+        last_error: str | None = None,
+    ) -> None:
+        async with self._connect() as connection:
+            await connection.execute(
+                """
+                INSERT INTO managed_accounts(
+                    toolkit, account_id, status, account_label, last_error, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(toolkit) DO UPDATE SET
+                    account_id = excluded.account_id,
+                    status = excluded.status,
+                    account_label = excluded.account_label,
+                    last_error = excluded.last_error,
+                    updated_at = excluded.updated_at
+                """,
+                (toolkit, account_id, status, account_label, last_error, _now()),
+            )
+            await connection.commit()
+
+    async def delete_managed_account(self, toolkit: str) -> None:
+        async with self._connect() as connection:
+            await connection.execute("DELETE FROM managed_accounts WHERE toolkit = ?", (toolkit,))
+            await connection.commit()
+
+    async def list_file_roots(self) -> list[FileRoot]:
+        async with self._connect() as connection:
+            cursor = await connection.execute("SELECT * FROM file_roots ORDER BY added_at")
+            rows = await cursor.fetchall()
+        return [self._file_root(dict(row)) for row in rows]
+
+    async def add_file_root(self, root_id: str, path: str, label: str) -> FileRoot:
+        timestamp = _now()
+        async with self._connect() as connection:
+            await connection.execute(
+                "INSERT INTO file_roots(id, path, label, added_at) VALUES (?, ?, ?, ?)",
+                (root_id, path, label, timestamp),
+            )
+            await connection.commit()
+        return FileRoot(
+            id=root_id,
+            path=path,
+            label=label,
+            exists=True,
+            added_at=datetime.fromisoformat(timestamp),
+        )
+
+    async def remove_file_root(self, root_id: str) -> None:
+        async with self._connect() as connection:
+            await connection.execute("DELETE FROM file_roots WHERE id = ?", (root_id,))
+            await connection.commit()
+
     async def set_running(self, run_id: str) -> None:
         await self._update_run(
             run_id,
@@ -219,9 +410,22 @@ class DayPilotRepository:
         )
         placeholders = ", ".join("?" for _ in unsafe_statuses)
         async with self._connect() as connection:
+            # A waiting row is only actionable when LangGraph left a durable
+            # checkpoint for its thread. Older crashes could leave the app row
+            # behind without a resumable checkpoint; those rows remain visible
+            # in history but must not block maintenance forever.
+            checkpoint_filter = " AND status <> ?"
+            if await self._table_exists(connection, "checkpoints"):
+                checkpoint_filter = (
+                    " AND (status <> ? OR EXISTS ("
+                    "SELECT 1 FROM checkpoints "
+                    "WHERE checkpoints.thread_id = runs.thread_id "
+                    "AND checkpoints.checkpoint IS NOT NULL))"
+                )
             cursor = await connection.execute(
-                f"SELECT * FROM runs WHERE status IN ({placeholders}) ORDER BY created_at DESC",
-                tuple(status.value for status in unsafe_statuses),
+                f"SELECT * FROM runs WHERE status IN ({placeholders}){checkpoint_filter} "
+                "ORDER BY created_at DESC",
+                (*[status.value for status in unsafe_statuses], RunStatus.WAITING_APPROVAL.value),
             )
             rows = await cursor.fetchall()
         return [self._run_record(dict(row)) for row in rows]
@@ -230,10 +434,9 @@ class DayPilotRepository:
         async with self._connect() as connection:
             await connection.execute("BEGIN IMMEDIATE")
             try:
-                cursor = await connection.execute("SELECT id, thread_id FROM runs")
+                cursor = await connection.execute("SELECT id FROM runs")
                 run_rows = await cursor.fetchall()
                 run_ids = [row["id"] for row in run_rows]
-                thread_ids = [row["thread_id"] for row in run_rows]
                 counts = {
                     "runs_removed": len(run_ids),
                     "events_removed": 0,
@@ -257,20 +460,16 @@ class DayPilotRepository:
                         f"DELETE FROM runs WHERE id IN ({run_placeholders})",
                         tuple(run_ids),
                     )
-                thread_placeholders = ", ".join("?" for _ in thread_ids)
                 for table, count_key in (
                     ("writes", "writes_removed"),
                     ("checkpoints", "checkpoints_removed"),
                 ):
                     if not await self._table_exists(connection, table):
                         continue
-                    if thread_ids:
-                        cursor = await connection.execute(
-                            f"DELETE FROM {table} WHERE thread_id IN ({thread_placeholders})",
-                            tuple(thread_ids),
-                        )
-                    else:
-                        cursor = await connection.execute(f"DELETE FROM {table}")
+                    # Clear history removes every run, so every checkpoint and
+                    # write is historical by definition. Deleting the whole
+                    # tables also cleans rows orphaned by an earlier failure.
+                    cursor = await connection.execute(f"DELETE FROM {table}")
                     counts[count_key] = cursor.rowcount
                 await connection.commit()
                 return counts
@@ -501,6 +700,15 @@ class DayPilotRepository:
             error=row["error"],
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    def _file_root(self, row: dict[str, Any]) -> FileRoot:
+        return FileRoot(
+            id=row["id"],
+            path=row["path"],
+            label=row["label"],
+            exists=Path(row["path"]).is_dir(),
+            added_at=datetime.fromisoformat(row["added_at"]),
         )
 
     def _execution_record(self, row: dict[str, Any]) -> dict[str, Any]:

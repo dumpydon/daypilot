@@ -126,6 +126,49 @@ async def test_reset_is_blocked_by_active_or_pending_runs(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_stale_waiting_row_without_checkpoint_does_not_block_reset(tmp_path: Path) -> None:
+    service, repository, database_path = await build_service(tmp_path)
+    store = DemoServiceStore(database_path, "Asia/Kolkata")
+    store.create_task("Temporary task")
+    await repository.create_run("run-stale", "thread-stale", "Stale approval")
+    await repository.set_plan("run-stale", [], approval_required=True)
+
+    result = await service.reset_demo_workspace()
+
+    assert result.status == "reset"
+    assert store.list_tasks()["count"] == 3
+    assert (await repository.get_run("run-stale")).status.value == "waiting_approval"
+
+
+@pytest.mark.asyncio
+async def test_waiting_row_with_checkpoint_still_blocks_reset(tmp_path: Path) -> None:
+    service, repository, database_path = await build_service(tmp_path)
+    await repository.create_run("run-live", "thread-live", "Live approval")
+    await repository.set_plan("run-live", [], approval_required=True)
+    with sqlite3.connect(database_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE checkpoints (
+                thread_id TEXT NOT NULL,
+                checkpoint_ns TEXT NOT NULL DEFAULT '',
+                checkpoint_id TEXT NOT NULL,
+                parent_checkpoint_id TEXT,
+                type TEXT,
+                checkpoint BLOB,
+                metadata BLOB,
+                PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+            );
+            INSERT INTO checkpoints(thread_id, checkpoint_id, checkpoint)
+            VALUES ('thread-live', 'checkpoint-1', X'01');
+            """
+        )
+        connection.commit()
+
+    with pytest.raises(RunConflictError, match="active or awaiting approval"):
+        await service.reset_demo_workspace()
+
+
+@pytest.mark.asyncio
 async def test_reset_rejects_non_demo_mode_before_touching_demo_store(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -222,6 +265,10 @@ async def test_clear_history_removes_runs_checkpoints_and_writes_but_preserves_d
             VALUES ('thread-run-one', 'checkpoint-1');
             INSERT INTO writes(thread_id, checkpoint_id, task_id, idx, channel)
             VALUES ('thread-run-one', 'checkpoint-1', 'task-1', 0, 'channel');
+            INSERT INTO checkpoints(thread_id, checkpoint_id)
+            VALUES ('orphan-thread', 'checkpoint-orphan');
+            INSERT INTO writes(thread_id, checkpoint_id, task_id, idx, channel)
+            VALUES ('orphan-thread', 'checkpoint-orphan', 'task-orphan', 0, 'channel');
             """
         )
         connection.commit()
@@ -232,8 +279,8 @@ async def test_clear_history_removes_runs_checkpoints_and_writes_but_preserves_d
     assert result.runs_removed == 2
     assert result.events_removed == 2
     assert result.executions_removed == 1
-    assert result.checkpoints_removed == 1
-    assert result.writes_removed == 1
+    assert result.checkpoints_removed == 2
+    assert result.writes_removed == 2
     assert await repository.list_runs() == []
     assert store.list_tasks()["count"] == 4
     assert await repository.get_preferences() == preferences

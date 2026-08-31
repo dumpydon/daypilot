@@ -33,21 +33,23 @@ export function CreatedOutputs({ outputs }: CreatedOutputsProps) {
   }, [selected]);
 
   if (outputs.length === 0) return null;
-  const hasFailure = outputs.some((output) => output.status === "failed" || output.status === "partially_completed");
+  const displayOutputs = outputs.map(defensiveOutput);
+  const hasFailure = displayOutputs.some(
+    (output) => output.status === "failed" || output.status === "partially_completed",
+  );
 
   return (
     <section className={styles.outputs} aria-labelledby="created-outputs-heading">
       <div className={styles.outputsHeader}>
-        <div>
-          <span className={styles.eyebrow}>Execution receipt</span>
-          <h3 id="created-outputs-heading">Created outputs</h3>
-        </div>
-        <span className={`${styles.outputsCount} ${hasFailure ? styles.outputsCountWarning : ""}`}>
-          {outputs.length} {outputs.length === 1 ? "output" : "outputs"}
-        </span>
+        <h3 id="created-outputs-heading">{outputs.length === 1 ? "Created resource" : "Created resources"}</h3>
+        {outputs.length > 1 && (
+          <span className={`${styles.outputsCount} ${hasFailure ? styles.outputsCountWarning : ""}`}>
+            {outputs.length} resources
+          </span>
+        )}
       </div>
       <div className={styles.outputList}>
-        {outputs.map((output) => (
+        {displayOutputs.map((output) => (
           <OutputRow key={output.action_id} output={output} onOpen={() => setSelected(output)} />
         ))}
       </div>
@@ -178,7 +180,7 @@ function actionLabelFor(output: ResourceReceipt) {
     if (output.resource_type === "x_post") return "View post";
     return "Open resource";
   }
-  if (output.resource_type === "calendar_event") return "View event";
+  if (output.resource_type === "calendar_event" && output.resource_id) return "View event";
   return "View details";
 }
 
@@ -187,4 +189,20 @@ function statusLabel(status: ReceiptStatus, verified: boolean) {
   if (status === "created") return "Created · verification unavailable";
   if (status === "partially_completed") return "Partially completed";
   return "Failed";
+}
+
+function defensiveOutput(output: ResourceReceipt): ResourceReceipt {
+  const impossibleVerifiedEmptyBatch = output.resource_type === "task_batch"
+    && output.status === "verified"
+    && output.verified
+    && output.items.length === 0
+    && /\b(?:created\s+)?0\s+tasks?\b/i.test(output.title);
+  if (!impossibleVerifiedEmptyBatch) return output;
+  return {
+    ...output,
+    title: "No tasks created",
+    status: "failed",
+    verified: false,
+    error: output.error ?? "The provider returned no created task resources.",
+  };
 }

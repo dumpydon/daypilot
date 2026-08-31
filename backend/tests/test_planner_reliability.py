@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -34,6 +36,30 @@ CALENDAR_READ_TOOL = ToolMetadata(
     risk_level=RiskLevel.SAFE_READ,
     side_effecting=False,
     input_schema={"required": ["start", "end"]},
+)
+TASK_TOOL = ToolMetadata(
+    name="create_task",
+    server_name="tasks",
+    description="Create one Google Task",
+    risk_level=RiskLevel.SIDE_EFFECT,
+    side_effecting=True,
+    input_schema={"required": ["title"]},
+)
+TASK_BATCH_TOOL = ToolMetadata(
+    name="create_task_batch",
+    server_name="tasks",
+    description="Create multiple Google Tasks",
+    risk_level=RiskLevel.SIDE_EFFECT,
+    side_effecting=True,
+    input_schema={"required": ["tasks"]},
+)
+TASK_READ_TOOL = ToolMetadata(
+    name="list_tasks",
+    server_name="tasks",
+    description="Read Google Tasks",
+    risk_level=RiskLevel.SAFE_READ,
+    side_effecting=False,
+    input_schema={},
 )
 
 
@@ -89,6 +115,47 @@ class RepairModel:
         return self.runnable
 
 
+@dataclass
+class SingleTaskRunnable:
+    calls: int = 0
+
+    async def ainvoke(
+        self,
+        prompt: str,
+        config: dict[str, Any] | None = None,
+    ) -> PlanningProposal:
+        self.calls += 1
+        return PlanningProposal(
+            actions=[
+                PlanAction(
+                    id="model-task",
+                    description="Create the requested task tomorrow",
+                    server_name="tasks",
+                    tool_name="create_task",
+                    # Simulate a model resolving “tomorrow” against a stale
+                    # date and emitting a naive provider value.
+                    arguments={
+                        "title": "DayPilot Tasks final verification 20260831",
+                        "due_at": "2026-08-30",
+                    },
+                    reason="The user requested a dated task.",
+                    side_effecting=True,
+                    status=ActionStatus.PENDING,
+                )
+            ]
+        )
+
+
+class SingleTaskModel:
+    def __init__(self) -> None:
+        self.runnable = SingleTaskRunnable()
+        self.method: str | None = None
+
+    def with_structured_output(self, _: type, *, method: str) -> SingleTaskRunnable:
+        self.method = method
+        return self.runnable
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "phrase",
@@ -115,6 +182,88 @@ async def test_read_only_availability_question_has_no_calendar_write_operation()
 
     assert intent.requested_operations == []
     assert "review_calendar" in intent.requested_outcomes
+
+
+@pytest.mark.asyncio
+async def test_single_google_task_uses_single_write_and_explains_due_date_only_semantics() -> None:
+    request = (
+        'Create a Google Task called "DayPilTasks dated verification" due tomorrow at 7:00 PM.'
+    )
+    reasoner = DeterministicReasoner("Asia/Kolkata")
+    intent = await reasoner.understand(request)
+    actions = PlanBuilder("Asia/Kolkata").build(
+        request,
+        intent,
+        {"tasks": [{"tool_name": "list_tasks", "success": True, "result": {"tasks": []}}]},
+        [TASK_TOOL, TASK_BATCH_TOOL, TASK_READ_TOOL],
+        PreferenceSet(),
+    )
+    task = next(action for action in actions if action.side_effecting)
+    assert task.tool_name == "create_task"
+    assert task.arguments["title"] == "DayPilTasks dated verification"
+    assert task.arguments["due_at"].endswith("+05:30")
+    assert "does not preserve an exact due time" in task.description
+
+
+@pytest.mark.asyncio
+async def test_openai_single_task_plan_canonicalizes_relative_due_date_and_timezone(
+    tmp_path,
+) -> None:
+    request = (
+        'Create a Google Task called "DayPilot Tasks final verification 20260831" due tomorrow.'
+    )
+    model = SingleTaskModel()
+    settings = Settings(
+        _env_file=None,
+        database_url=f"sqlite:///{tmp_path / 'planner.db'}",
+        openai_api_key="test-key",
+        daypilot_timezone="Asia/Kolkata",
+    )
+    intent = await DeterministicReasoner("Asia/Kolkata").understand(request)
+
+    actions = await OpenAIReasoner(settings, model=model).propose_write_actions(
+        request,
+        intent,
+        {"tasks": []},
+        [TASK_TOOL],
+        PreferenceSet(),
+    )
+
+    assert actions is not None
+    task = actions[0]
+    expected_date = datetime.now(ZoneInfo("Asia/Kolkata")).date() + timedelta(days=1)
+    parsed_due = datetime.fromisoformat(task.arguments["due_at"])
+    assert task.tool_name == "create_task"
+    assert parsed_due.date() == expected_date
+    assert parsed_due.tzinfo is not None
+    assert task.description.endswith(f"due {expected_date.strftime('%b %-d, %Y')}.")
+    assert model.runnable.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_multiple_task_request_keeps_batch_semantics() -> None:
+    request = "Create two Google Tasks for my grocery list."
+    intent = await DeterministicReasoner("Asia/Kolkata").understand(request)
+    actions = PlanBuilder("Asia/Kolkata").build(
+        request,
+        intent,
+        {"tasks": [{"tool_name": "list_tasks", "success": True, "result": {"tasks": []}}]},
+        [TASK_TOOL, TASK_BATCH_TOOL, TASK_READ_TOOL],
+        PreferenceSet(),
+    )
+    assert (
+        next(action for action in actions if action.side_effecting).tool_name == "create_task_batch"
+    )
+
+
+@pytest.mark.asyncio
+async def test_find_free_focus_block_is_read_only_without_schedule_request() -> None:
+    intent = await DeterministicReasoner("Asia/Kolkata").understand(
+        "Find a free 90-minute focus block tonight."
+    )
+
+    assert intent.requested_operations == []
+    assert "create_event" not in intent.requested_outcomes
 
 
 @pytest.mark.asyncio
@@ -188,6 +337,24 @@ def test_tonight_one_am_rolls_to_the_upcoming_date() -> None:
     assert start.hour == 1
     assert end.hour == 2 and end.minute == 30
     assert start.date() >= datetime.now(ZoneInfo("Asia/Kolkata")).date()
+
+
+@pytest.mark.asyncio
+async def test_single_task_preserves_an_explicit_iso_due_date() -> None:
+    request = 'Create a Google Task called "Date-only verification" due 2026-09-04.'
+    reasoner = DeterministicReasoner("Asia/Kolkata")
+    # Keep this check on the same request-time parser used by both deterministic
+    # and OpenAI-backed planning paths.
+    intent = await reasoner.understand(request)
+    actions = PlanBuilder("Asia/Kolkata").build(
+        request,
+        intent,
+        {"tasks": []},
+        [TASK_TOOL],
+        PreferenceSet(),
+    )
+    task = next(action for action in actions if action.side_effecting)
+    assert task.arguments["due_at"].startswith("2026-09-04T00:00:00")
 
 
 @pytest.mark.asyncio

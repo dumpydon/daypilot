@@ -168,7 +168,7 @@ class RunCoordinator:
                 raise PlanRevisionError("Plan revision did not return to the approval checkpoint")
             return revised
 
-    async def wait_until_settled(self, run_id: str, max_wait_seconds: float = 15) -> RunDetail:
+    async def wait_until_settled(self, run_id: str, max_wait_seconds: float = 30) -> RunDetail:
         deadline = asyncio.get_running_loop().time() + max_wait_seconds
         while asyncio.get_running_loop().time() < deadline:
             run = await self.repository.get_run(run_id)

@@ -1,8 +1,9 @@
 import { Clock3, Database, History, X } from "lucide-react";
 import { FormEvent, useState } from "react";
 
-import type { Preferences } from "@/lib/types";
+import type { ConnectionCatalog, FileRoot, Preferences } from "@/lib/types";
 
+import { ConnectionSettings } from "./ConnectionSettings";
 import styles from "./workspace.module.css";
 
 interface PreferencesDialogProps {
@@ -14,6 +15,14 @@ interface PreferencesDialogProps {
   maintenanceBlocked: boolean;
   maintenanceMessage: string | null;
   maintenanceBusy: boolean;
+  connections?: ConnectionCatalog;
+  fileRoots?: FileRoot[];
+  onConnectGoogle?: () => Promise<void>;
+  onDisconnectGoogle?: () => Promise<void>;
+  onConnectX?: () => Promise<void>;
+  onDisconnectX?: () => Promise<void>;
+  onAddFileRoot?: (path: string) => Promise<void>;
+  onRemoveFileRoot?: (rootId: string) => Promise<void>;
 }
 
 export function PreferencesDialog({
@@ -25,6 +34,14 @@ export function PreferencesDialog({
   maintenanceBlocked,
   maintenanceMessage,
   maintenanceBusy,
+  connections,
+  fileRoots = [],
+  onConnectGoogle = noopAsync,
+  onDisconnectGoogle = noopAsync,
+  onConnectX = noopAsync,
+  onDisconnectX = noopAsync,
+  onAddFileRoot = noopAsync,
+  onRemoveFileRoot = noopAsync,
 }: PreferencesDialogProps) {
   const [draft, setDraft] = useState(preferences);
   const [busy, setBusy] = useState(false);
@@ -41,21 +58,35 @@ export function PreferencesDialog({
         <label>Default focus block <span>{draft.preferred_focus_block_minutes} minutes</span><input type="range" min="30" max="180" step="15" value={draft.preferred_focus_block_minutes} onChange={(event) => setDraft({ ...draft, preferred_focus_block_minutes: Number(event.target.value) })} /></label>
         <label>Avoid scheduling after<input type="time" value={draft.avoid_scheduling_after} onChange={(event) => setDraft({ ...draft, avoid_scheduling_after: event.target.value })} /></label>
         <label>Preferred task due time<input type="time" value={draft.preferred_task_due_time} onChange={(event) => setDraft({ ...draft, preferred_task_due_time: event.target.value })} /></label>
+        {connections && (
+          <ConnectionSettings
+            catalog={connections}
+            fileRoots={fileRoots}
+            onConnectGoogle={onConnectGoogle}
+            onDisconnectGoogle={onDisconnectGoogle}
+            onConnectX={onConnectX}
+            onDisconnectX={onDisconnectX}
+            onAddFileRoot={onAddFileRoot}
+            onRemoveFileRoot={onRemoveFileRoot}
+          />
+        )}
         <div className={styles.settingsDivider} />
-        <div className={styles.settingsSection}>
-          <div className={styles.settingsSectionHeader}>
-            <Database size={14} />
-            <div><strong>Demo workspace</strong><p>Restore Mail, Calendar, Tasks, Files and X to their seeded state.</p></div>
+        {(!connections || connections.demo_mode) && (
+          <div className={styles.settingsSection}>
+            <div className={styles.settingsSectionHeader}>
+              <Database size={14} />
+              <div><strong>Demo workspace</strong><p>Restore Mail, Calendar, Tasks, Files and X to their seeded state.</p></div>
+            </div>
+            <button
+              className={styles.dangerButton}
+              type="button"
+              disabled={busy || maintenanceBusy || maintenanceBlocked}
+              onClick={onResetDemoRequest}
+            >
+              Reset demo workspace
+            </button>
           </div>
-          <button
-            className={styles.dangerButton}
-            type="button"
-            disabled={busy || maintenanceBusy || maintenanceBlocked}
-            onClick={onResetDemoRequest}
-          >
-            Reset demo workspace
-          </button>
-        </div>
+        )}
         <div className={styles.settingsSection}>
           <div className={styles.settingsSectionHeader}>
             <History size={14} />
@@ -76,3 +107,5 @@ export function PreferencesDialog({
     </div>
   );
 }
+
+async function noopAsync() {}

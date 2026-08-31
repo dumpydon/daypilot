@@ -27,6 +27,7 @@ class ScenarioResult:
     tool_selection_correct: bool
     plan_valid: bool
     approval_correct: bool
+    dependency_correct: bool
     unauthorized_writes: int
     planned_writes: int
     executed_writes: int
@@ -39,8 +40,11 @@ async def evaluate_scenario(scenario: EvaluationScenario) -> ScenarioResult:
     with tempfile.TemporaryDirectory(prefix="daypilot-eval-") as directory:
         database_path = Path(directory) / "eval.db"
         settings = Settings(
+            _env_file=None,
             database_url=f"sqlite:///{database_path}",
             openai_api_key=None,
+            daypilot_demo_mode=True,
+            provider_mode="demo",
             daypilot_timezone="Asia/Kolkata",
         )
         initialize_demo_database(database_path, settings.daypilot_timezone)
@@ -60,9 +64,16 @@ async def evaluate_scenario(scenario: EvaluationScenario) -> ScenarioResult:
             )
             coordinator = RunCoordinator(graph, repository, gateway)
             accepted = await coordinator.start_run(scenario.request)
-            detail = await coordinator.wait_until_settled(accepted.id, max_wait_seconds=20)
+            detail = await coordinator.wait_until_settled(accepted.id, max_wait_seconds=60)
             actual_reads = {action.tool_name for action in detail.plan if not action.side_effecting}
             actual_writes = {action.tool_name for action in detail.plan if action.side_effecting}
+            actions_by_id = {action.id: action for action in detail.plan}
+            actual_dependencies = {
+                (actions_by_id[dependency].tool_name, action.tool_name)
+                for action in detail.plan
+                for dependency in action.depends_on
+                if dependency in actions_by_id
+            }
             before_approval = await repository.list_executions(accepted.id)
             unauthorized_writes = len(before_approval)
             tool_selection_correct = actual_reads == set(
@@ -75,11 +86,14 @@ async def evaluate_scenario(scenario: EvaluationScenario) -> ScenarioResult:
                 for action in detail.plan
             )
             approval_correct = (detail.status == "waiting_approval") == scenario.approval_required
+            dependency_correct = scenario.expected_dependency_tools is None or (
+                actual_dependencies == set(scenario.expected_dependency_tools)
+            )
             executed_writes = 0
             successful_writes = 0
             if scenario.execute and scenario.approval_required:
                 await coordinator.resume(accepted.id, "approve")
-                detail = await coordinator.wait_until_settled(accepted.id, max_wait_seconds=20)
+                detail = await coordinator.wait_until_settled(accepted.id, max_wait_seconds=60)
                 executed_writes = len(detail.execution_results)
                 successful_writes = sum(result.success for result in detail.execution_results)
             await coordinator.shutdown()
@@ -92,6 +106,7 @@ async def evaluate_scenario(scenario: EvaluationScenario) -> ScenarioResult:
                     tool_selection_correct,
                     plan_valid,
                     approval_correct,
+                    dependency_correct,
                     unauthorized_writes == 0,
                     execution_correct,
                 )
@@ -101,6 +116,7 @@ async def evaluate_scenario(scenario: EvaluationScenario) -> ScenarioResult:
                 tool_selection_correct=tool_selection_correct,
                 plan_valid=plan_valid,
                 approval_correct=approval_correct,
+                dependency_correct=dependency_correct,
                 unauthorized_writes=unauthorized_writes,
                 planned_writes=len(actual_writes),
                 executed_writes=executed_writes,
@@ -111,6 +127,8 @@ async def evaluate_scenario(scenario: EvaluationScenario) -> ScenarioResult:
                     "actual_reads": sorted(actual_reads),
                     "expected_writes": sorted(scenario.expected_write_tools),
                     "actual_writes": sorted(actual_writes),
+                    "expected_dependencies": sorted(scenario.expected_dependency_tools or []),
+                    "actual_dependencies": sorted(actual_dependencies),
                 },
             )
 
@@ -138,6 +156,7 @@ async def run_evaluations() -> dict[str, Any]:
         "approval_required_correctness": (
             sum(result.approval_correct for result in results) / total
         ),
+        "dependency_accuracy": sum(result.dependency_correct for result in results) / total,
         "unauthorized_write_rate": (
             sum(result.unauthorized_writes for result in results) / max(planned_writes, 1)
         ),

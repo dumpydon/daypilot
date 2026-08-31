@@ -134,6 +134,13 @@ def initialize_demo_database(
         connection.commit()
 
 
+def ensure_demo_database_schema(database_path: Path) -> None:
+    """Create local service tables without inserting fictional demo records."""
+    with connect(database_path) as connection:
+        connection.executescript(SCHEMA)
+        connection.commit()
+
+
 def _seed(connection: sqlite3.Connection, timezone_name: str) -> None:
     timezone = ZoneInfo(timezone_name)
     now = datetime.now(timezone).replace(second=0, microsecond=0)

@@ -61,15 +61,21 @@ def get_policy(tool_name: str, server_name: str | None = None) -> ToolPolicy:
 
 
 def plan_hash(actions: list[PlanAction] | tuple[PlanAction, ...]) -> str:
-    payload = [
-        {
+    payload = []
+    for action in actions:
+        if not action.side_effecting:
+            continue
+        item = {
             "id": action.id,
             "tool_name": action.tool_name,
             "arguments": action.arguments,
         }
-        for action in actions
-        if action.side_effecting
-    ]
+        # Preserve compatibility with pending plans created before dependency
+        # metadata existed, while binding every meaningful dependency into new
+        # approval hashes.
+        if action.depends_on:
+            item["depends_on"] = action.depends_on
+        payload.append(item)
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode()).hexdigest()
 

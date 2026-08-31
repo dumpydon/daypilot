@@ -18,22 +18,36 @@ from backend.app.mcp.policy import (
     enforce_tool_policy,
     get_policy,
 )
+from backend.app.providers.manager import ConnectionManager
 
 
 class MCPGateway:
     """The only bridge from orchestration to dynamically discovered MCP tools."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self, settings: Settings, connection_manager: ConnectionManager | None = None
+    ) -> None:
         self.settings = settings
+        self.connection_manager = connection_manager
         self._tools: dict[str, BaseTool] = {}
         self._metadata: dict[str, ToolMetadata] = {}
         self._server_status: dict[str, dict[str, Any]] = {}
         project_root = Path(__file__).resolve().parents[3]
+        # Keep provider secrets/configuration explicit, but retain the standard
+        # runtime environment needed by SDK TLS/HTTP clients (notably HOME for
+        # the Composio client). Never forward the parent environment wholesale.
+        runtime_env = {
+            key: os.environ[key]
+            for key in ("HOME", "USER", "LANG", "LC_ALL", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE")
+            if os.environ.get(key)
+        }
         base_env = {
             "DAYPILOT_DATABASE_PATH": str(settings.database_path),
             "DAYPILOT_TIMEZONE": settings.daypilot_timezone,
             "PYTHONPATH": str(project_root),
             "PATH": os.getenv("PATH", ""),
+            **runtime_env,
+            **settings.mcp_environment(),
         }
         self.connections: dict[str, dict[str, Any]] = {
             name: {
@@ -114,7 +128,17 @@ class MCPGateway:
         return self._structured_result(result)
 
     def catalog(self) -> list[dict[str, Any]]:
-        return list(self._server_status.values())
+        return [
+            {
+                **status,
+                **(
+                    self.connection_manager.status(server_name)
+                    if self.connection_manager is not None
+                    else {}
+                ),
+            }
+            for server_name, status in self._server_status.items()
+        ]
 
     def metadata(self, tool_name: str) -> ToolMetadata | None:
         return self._metadata.get(tool_name)

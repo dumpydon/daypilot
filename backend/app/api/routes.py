@@ -5,15 +5,19 @@ import json
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Header, Query, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 
 from backend.app.config import Settings
 from backend.app.domain.models import (
+    ConnectionCatalog,
     CreateRunRequest,
     DecisionRequest,
     DemoResetResponse,
     FeedbackRequest,
+    FileRoot,
+    FileRootRequest,
     HealthResponse,
+    OAuthStartResponse,
     PreferenceSet,
     RunAccepted,
     RunDetail,
@@ -54,6 +58,109 @@ async def create_run(payload: CreateRunRequest, request: Request) -> RunAccepted
 @router.post("/api/demo-workspace/reset", response_model=DemoResetResponse)
 async def reset_demo_workspace(request: Request) -> DemoResetResponse:
     return await request.app.state.demo_workspace.reset_demo_workspace()
+
+
+@router.get("/api/connections", response_model=ConnectionCatalog)
+async def list_connections(request: Request) -> ConnectionCatalog:
+    return request.app.state.connections.catalog()
+
+
+@router.post("/api/connections/google/start", response_model=OAuthStartResponse)
+async def start_google_connection(request: Request) -> OAuthStartResponse:
+    return request.app.state.connections.start_google()
+
+
+@router.get("/api/connections/google/callback")
+async def google_callback(
+    request: Request,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+) -> RedirectResponse:
+    settings = request.app.state.settings
+    try:
+        await request.app.state.connections.complete_google(code, state, error)
+        return RedirectResponse(f"{settings.site_url}/?connection=google_connected")
+    except Exception as exc:
+        return RedirectResponse(
+            f"{settings.site_url}/?connection=google_error&message={_quote_error(exc)}"
+        )
+
+
+@router.post("/api/connections/google/disconnect", response_model=ConnectionCatalog)
+async def disconnect_google(request: Request) -> ConnectionCatalog:
+    await request.app.state.connections.disconnect_google()
+    return request.app.state.connections.catalog()
+
+
+@router.post("/api/connections/x/start", response_model=OAuthStartResponse)
+async def start_x_connection(request: Request) -> OAuthStartResponse:
+    return request.app.state.connections.start_x()
+
+
+@router.get("/api/connections/x/callback")
+async def x_callback(
+    request: Request,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+) -> RedirectResponse:
+    settings = request.app.state.settings
+    try:
+        await request.app.state.connections.complete_x(code, state, error)
+        return RedirectResponse(f"{settings.site_url}/?connection=x_connected")
+    except Exception as exc:
+        return RedirectResponse(
+            f"{settings.site_url}/?connection=x_error&message={_quote_error(exc)}"
+        )
+
+
+@router.get("/api/connections/managed/callback")
+async def managed_connection_callback(
+    request: Request,
+    provider: str | None = None,
+    status: str | None = None,
+    connected_account_id: str | None = None,
+    connectedAccountId: str | None = None,
+    error: str | None = None,
+) -> RedirectResponse:
+    settings = request.app.state.settings
+    provider_name = provider or ""
+    account_id = connected_account_id or connectedAccountId
+    try:
+        await request.app.state.connections.complete_managed(
+            provider_name,
+            status,
+            account_id,
+            error,
+        )
+        return RedirectResponse(f"{settings.site_url}/?connection={provider_name}_connected")
+    except Exception as exc:
+        return RedirectResponse(
+            f"{settings.site_url}/?connection={provider_name or 'managed'}_error"
+            f"&message={_quote_error(exc)}"
+        )
+
+
+@router.post("/api/connections/x/disconnect", response_model=ConnectionCatalog)
+async def disconnect_x(request: Request) -> ConnectionCatalog:
+    await request.app.state.connections.disconnect_x()
+    return request.app.state.connections.catalog()
+
+
+@router.get("/api/connections/files/roots", response_model=list[FileRoot])
+async def list_file_roots(request: Request) -> list[FileRoot]:
+    return await request.app.state.connections.list_file_roots()
+
+
+@router.post("/api/connections/files/roots", response_model=FileRoot)
+async def add_file_root(payload: FileRootRequest, request: Request) -> FileRoot:
+    return await request.app.state.connections.add_file_root(payload.path)
+
+
+@router.delete("/api/connections/files/roots/{root_id}", status_code=204)
+async def remove_file_root(root_id: str, request: Request) -> None:
+    await request.app.state.connections.remove_file_root(root_id)
 
 
 @router.post("/api/run-history/clear", response_model=RunHistoryClearResponse)
@@ -129,6 +236,12 @@ async def update_preferences(
 ) -> PreferenceSet:
     _, repository, _, _ = _services(request)
     return await repository.update_preferences(preferences)
+
+
+def _quote_error(error: Exception) -> str:
+    from urllib.parse import quote
+
+    return quote(str(error)[:240], safe="")
 
 
 @router.get("/api/runs/{run_id}/events")

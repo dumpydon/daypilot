@@ -98,6 +98,7 @@ class PlanAction(BaseModel):
     reason: str
     side_effecting: bool
     status: ActionStatus = ActionStatus.PENDING
+    depends_on: list[str] = Field(default_factory=list)
 
 
 class PlanningProposal(BaseModel):
@@ -221,6 +222,51 @@ class HealthResponse(BaseModel):
     graph: Literal["ready"] = "ready"
     demo_mode: bool
     reasoning_mode: str
+
+
+class ProviderConnectionState(StrEnum):
+    CONNECTED = "connected"
+    DISCONNECTED = "disconnected"
+    CONNECTING = "connecting"
+    RECONNECT_REQUIRED = "reconnect_required"
+    ERROR = "error"
+    UNAVAILABLE = "unavailable"
+
+
+class ProviderConnection(BaseModel):
+    service: Literal["mail", "calendar", "tasks", "files", "x"]
+    provider: str
+    state: ProviderConnectionState
+    account_label: str | None = None
+    capabilities: list[str] = Field(default_factory=list)
+    last_error: str | None = None
+    requires_reauth: bool = False
+    metadata: JsonDict = Field(default_factory=dict)
+    connection_mode: Literal["demo", "managed", "direct", "local"] = "demo"
+
+
+class ConnectionCatalog(BaseModel):
+    demo_mode: bool
+    connections: list[ProviderConnection]
+
+
+class OAuthStartResponse(BaseModel):
+    provider: Literal["google", "x"]
+    authorization_url: str
+    scopes: list[str]
+    mode: Literal["managed", "direct"] = "direct"
+
+
+class FileRoot(BaseModel):
+    id: str
+    path: str
+    label: str
+    exists: bool
+    added_at: datetime
+
+
+class FileRootRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=2_000)
 
 
 class DemoResetResponse(BaseModel):

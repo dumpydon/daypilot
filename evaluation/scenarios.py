@@ -11,9 +11,49 @@ class EvaluationScenario:
     expected_write_tools: frozenset[str]
     approval_required: bool
     execute: bool = False
+    expected_dependency_tools: frozenset[tuple[str, str]] | None = None
 
 
 SCENARIOS = [
+    EvaluationScenario(
+        "independent_mail_and_tasks_dependencies",
+        "Show my latest emails and current tasks.",
+        frozenset({"search_mail", "list_tasks"}),
+        frozenset(),
+        False,
+        expected_dependency_tools=frozenset(),
+    ),
+    EvaluationScenario(
+        "cross_service_dependency_plan",
+        (
+            "Find my latest interview email, check when it is, find a free preparation slot "
+            'before it, create a preparation block, and create one Google Task called "Interview '
+            'prep". Do not draft an email and do not ask me for approval.'
+        ),
+        frozenset({"search_mail", "get_thread", "list_events", "find_free_slots", "list_tasks"}),
+        frozenset({"create_event", "create_task"}),
+        True,
+        expected_dependency_tools=frozenset(
+            {
+                ("search_mail", "get_thread"),
+                ("get_thread", "list_events"),
+                ("get_thread", "find_free_slots"),
+                ("find_free_slots", "create_event"),
+                ("find_free_slots", "create_task"),
+            }
+        ),
+    ),
+    EvaluationScenario(
+        "cross_service_missing_evidence",
+        (
+            "Find the meeting email from Nobody, find a free slot before it, create a "
+            'preparation event, and create one Google Task called "Preparation".'
+        ),
+        frozenset({"search_mail", "list_events", "find_free_slots", "list_tasks"}),
+        frozenset(),
+        False,
+        expected_dependency_tools=frozenset(),
+    ),
     EvaluationScenario(
         "calendar_read_only",
         "What's on my calendar tomorrow?",

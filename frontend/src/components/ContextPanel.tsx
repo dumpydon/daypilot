@@ -7,7 +7,14 @@ import styles from "./workspace.module.css";
 
 export function ContextPanel({ context }: { context: Record<string, ContextRecord[]> }) {
   const [expanded, setExpanded] = useState(false);
-  const mail = context.mail?.findLast((record) => record.tool_name === "get_thread" && record.success);
+  const failures = Object.entries(context).flatMap(([service, records]) => (
+    records.filter((record) => !record.success && record.error).map((record) => ({
+      service,
+      error: record.error as string,
+    }))
+  ));
+  const mail = context.mail?.findLast((record) => record.tool_name === "get_thread" && record.success)
+    ?? context.mail?.findLast((record) => record.tool_name === "search_mail" && record.success);
   const events = context.calendar?.findLast((record) => record.tool_name === "list_events" && record.success);
   const slots = context.calendar?.findLast((record) => record.tool_name === "find_free_slots" && record.success);
   const tasks = context.tasks?.findLast((record) => record.tool_name === "list_tasks" && record.success);
@@ -15,6 +22,7 @@ export function ContextPanel({ context }: { context: Record<string, ContextRecor
     ?? context.files?.findLast((record) => record.tool_name === "search_files" && record.success);
   const posts = context.x?.findLast((record) => ["search_posts", "get_user_posts", "get_post"].includes(record.tool_name) && record.success);
   const mailMessages = mail?.result?.messages;
+  const mailThreads = mail?.result?.threads;
   const calendarEvents = events?.result?.events;
   const taskItems = tasks?.result?.tasks;
   const fileItems = files?.result?.files;
@@ -23,26 +31,48 @@ export function ContextPanel({ context }: { context: Record<string, ContextRecor
   return (
     <section className={`${styles.contextPanel} ${expanded ? styles.contextExpanded : ""}`}>
       <div className={styles.sectionHeader}>
-        <div><span className={styles.eyebrow}>Context gathered</span><h2>Grounded service facts</h2></div>
+        <div><span className={styles.eyebrow}>Evidence</span><h2>Context used</h2></div>
         <button className={styles.sectionAction} onClick={() => setExpanded((value) => !value)} aria-expanded={expanded}>
+          {failures.length > 0 && <span className={styles.contextIssueCount}>{failures.length} issue{failures.length === 1 ? "" : "s"}</span>}
           {expanded ? "Hide details" : "View details"}<ChevronDown size={13} className={expanded ? styles.chevronOpen : ""} />
         </button>
       </div>
       <div className={styles.contextSummary}>
-        <ContextStat icon={<Mail size={14} />} label="Mail" value={Array.isArray(mailMessages) ? `${mailMessages.length} messages` : "Not queried"} />
-        <ContextStat icon={<CalendarDays size={14} />} label="Calendar" value={Array.isArray(calendarEvents) ? `${calendarEvents.length} events` : slots ? "Availability found" : "Not queried"} />
-        <ContextStat icon={<CheckSquare2 size={14} />} label="Tasks" value={Array.isArray(taskItems) ? `${taskItems.length} tasks` : "Not queried"} />
-        <ContextStat icon={<Files size={14} />} label="Files" value={files?.result?.filename ? "1 file read" : Array.isArray(fileItems) ? `${fileItems.length} files` : "Not queried"} />
-        <ContextStat icon={<AtSign size={14} />} label="X" value={Array.isArray(postItems) ? `${postItems.length} posts` : posts?.result?.text ? "1 post read" : "Not queried"} />
+        <ContextStat
+          icon={<Mail size={14} />}
+          label="Mail"
+          value={
+            Array.isArray(mailMessages)
+              ? countLabel(mailMessages.length, "message")
+              : Array.isArray(mailThreads)
+                ? countLabel(mailThreads.length, "thread")
+                : mail
+                  ? "Queried"
+                  : "Not queried"
+          }
+        />
+        <ContextStat icon={<CalendarDays size={14} />} label="Calendar" value={Array.isArray(calendarEvents) ? countLabel(calendarEvents.length, "event") : slots ? "Availability found" : "Not queried"} />
+        <ContextStat icon={<CheckSquare2 size={14} />} label="Tasks" value={Array.isArray(taskItems) ? countLabel(taskItems.length, "task") : "Not queried"} />
+        <ContextStat icon={<Files size={14} />} label="Files" value={files?.result?.filename ? "1 file read" : Array.isArray(fileItems) ? countLabel(fileItems.length, "file") : "Not queried"} />
+        <ContextStat icon={<AtSign size={14} />} label="X" value={Array.isArray(postItems) ? countLabel(postItems.length, "post") : posts?.result?.text ? "1 post read" : "Not queried"} />
       </div>
       {expanded && (
-        <div className={styles.contextDetails}>
-          <ContextCard icon={<Mail size={13} />} label="Mail" title={mailTitle(mail)} detail={mailDetail(mail)} />
-          <ContextCard icon={<CalendarDays size={13} />} label="Calendar" title={calendarTitle(events, slots)} detail={calendarDetail(events, slots)} />
-          <ContextCard icon={<CheckSquare2 size={13} />} label="Tasks" title={taskTitle(tasks)} detail="Grounded task IDs remain available to the planner." />
-          <ContextCard icon={<Files size={13} />} label="Files" title={fileTitle(files)} detail={fileDetail(files)} />
-          <ContextCard icon={<AtSign size={13} />} label="X" title={postTitle(posts)} detail={postDetail(posts)} />
-        </div>
+        <>
+          <div className={styles.contextDetails}>
+            <ContextCard icon={<Mail size={13} />} label="Mail" title={mailTitle(mail)} detail={mailDetail(mail)} />
+            <ContextCard icon={<CalendarDays size={13} />} label="Calendar" title={calendarTitle(events, slots)} detail={calendarDetail(events, slots)} />
+            <ContextCard icon={<CheckSquare2 size={13} />} label="Tasks" title={taskTitle(tasks)} detail="Grounded task IDs remain available to the planner." />
+            <ContextCard icon={<Files size={13} />} label="Files" title={fileTitle(files)} detail={fileDetail(files)} />
+            <ContextCard icon={<AtSign size={13} />} label="X" title={postTitle(posts)} detail={postDetail(posts)} />
+          </div>
+          {failures.length > 0 && (
+            <div className={styles.contextIssues} role="status">
+              {failures.map((failure, index) => (
+                <p key={`${failure.service}-${index}`}><strong>{failure.service}</strong>{failure.error}</p>
+              ))}
+            </div>
+          )}
+        </>
       )}
     </section>
   );
@@ -58,12 +88,24 @@ function ContextCard({ icon, label, title, detail }: { icon: React.ReactNode; la
 
 function mailTitle(record?: ContextRecord) {
   const result = record?.result;
-  return typeof result?.subject === "string" ? result.subject : "No matching thread read";
+  if (typeof result?.subject === "string") return result.subject;
+  const threads = result?.threads;
+  if (Array.isArray(threads)) {
+    return `${threads.length} matching mail thread${threads.length === 1 ? "" : "s"}`;
+  }
+  return "No matching thread read";
 }
 
 function mailDetail(record?: ContextRecord) {
   const messages = record?.result?.messages;
-  return Array.isArray(messages) ? `${messages.length} grounded message${messages.length === 1 ? "" : "s"} retrieved.` : "Mail facts will appear after a successful read.";
+  if (Array.isArray(messages)) {
+    return `${messages.length} grounded message${messages.length === 1 ? "" : "s"} retrieved.`;
+  }
+  const threads = record?.result?.threads;
+  if (Array.isArray(threads)) {
+    return `${threads.length} matching mail thread${threads.length === 1 ? "" : "s"} returned by search.`;
+  }
+  return "Mail facts will appear after a successful read.";
 }
 
 function calendarTitle(events?: ContextRecord, slots?: ContextRecord) {
@@ -112,4 +154,8 @@ function postDetail(record?: ContextRecord) {
 function formatRange(start: string, end: string) {
   const formatter = new Intl.DateTimeFormat("en", { hour: "numeric", minute: "2-digit" });
   return `${formatter.format(new Date(start))}–${formatter.format(new Date(end))}`;
+}
+
+function countLabel(count: number, noun: string) {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }

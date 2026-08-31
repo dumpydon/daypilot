@@ -1,5 +1,7 @@
 import type {
   DemoResetResponse,
+  ConnectionCatalog,
+  FileRoot,
   HealthStatus,
   Preferences,
   RunDetail,
@@ -22,6 +24,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const payload = (await response.json().catch(() => null)) as { detail?: string } | null;
     throw new Error(payload?.detail ?? `DayPilot API returned ${response.status}`);
   }
+  if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 
@@ -34,7 +37,7 @@ export async function getRun(runId: string): Promise<RunDetail> {
 }
 
 export async function listRuns(): Promise<RunRecord[]> {
-  return request("/api/runs?limit=25");
+  return request("/api/runs?limit=100");
 }
 
 export async function decideRun(
@@ -65,6 +68,41 @@ export async function getTools(): Promise<ToolCatalog> {
 
 export async function getHealth(): Promise<HealthStatus> {
   return request("/health");
+}
+
+export async function getConnections(): Promise<ConnectionCatalog> {
+  return request("/api/connections");
+}
+
+export async function startGoogleConnection(): Promise<{ authorization_url: string }> {
+  return request("/api/connections/google/start", { method: "POST" });
+}
+
+export async function disconnectGoogle(): Promise<ConnectionCatalog> {
+  return request("/api/connections/google/disconnect", { method: "POST" });
+}
+
+export async function startXConnection(): Promise<{ authorization_url: string }> {
+  return request("/api/connections/x/start", { method: "POST" });
+}
+
+export async function disconnectX(): Promise<ConnectionCatalog> {
+  return request("/api/connections/x/disconnect", { method: "POST" });
+}
+
+export async function listFileRoots(): Promise<FileRoot[]> {
+  return request("/api/connections/files/roots");
+}
+
+export async function addFileRoot(path: string): Promise<FileRoot> {
+  return request("/api/connections/files/roots", {
+    method: "POST",
+    body: JSON.stringify({ path }),
+  });
+}
+
+export async function removeFileRoot(rootId: string): Promise<void> {
+  await request(`/api/connections/files/roots/${encodeURIComponent(rootId)}`, { method: "DELETE" });
 }
 
 export async function getPreferences(): Promise<Preferences> {

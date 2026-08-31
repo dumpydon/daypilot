@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -10,6 +10,7 @@ from backend.app.domain.models import (
     ActionStatus,
     PlanAction,
     PreferenceSet,
+    ProposedToolCall,
     ToolMetadata,
     UserIntent,
 )
@@ -34,12 +35,9 @@ class PlanBuilder:
         lowered_feedback = (feedback or "").lower()
 
         if (
-            (
-                "calendar_create" in intent.requested_operations
-                or "create_event" in intent.requested_outcomes
-            )
-            and "create_event" not in tool_names
-        ):
+            "calendar_create" in intent.requested_operations
+            or "create_event" in intent.requested_outcomes
+        ) and "create_event" not in tool_names:
             raise InvalidPlanError(
                 "Structured intent requires unavailable write tool: create_event"
             )
@@ -56,12 +54,13 @@ class PlanBuilder:
             if event_action:
                 actions.append(event_action)
 
-        if (
-            "create_checklist" in intent.requested_outcomes
-            and "create_task_batch" in tool_names
-            and not _feedback_removes(lowered_feedback, ("task", "checklist"))
+        if "create_checklist" in intent.requested_outcomes and not _feedback_removes(
+            lowered_feedback, ("task", "checklist")
         ):
-            actions.append(self._checklist_action(request, context, preferences))
+            if _is_single_task_request(request) and "create_task" in tool_names:
+                actions.append(self._task_action(request))
+            elif "create_task_batch" in tool_names:
+                actions.append(self._checklist_action(request, context, preferences))
 
         if (
             "create_draft" in intent.requested_outcomes
@@ -83,8 +82,7 @@ class PlanBuilder:
         if "publish_post" in intent.requested_outcomes and "publish_post" in tool_names:
             actions.append(self._publish_post_action(request, context))
 
-        self._validate(actions, tools)
-        return actions
+        return self.finalize(actions, request, intent, context, tools)
 
     def read_actions(
         self,
@@ -98,6 +96,95 @@ class PlanBuilder:
         tools: list[ToolMetadata],
     ) -> None:
         self._validate(actions, tools)
+
+    def finalize(
+        self,
+        actions: list[PlanAction],
+        request: str,
+        intent: UserIntent,
+        context: dict[str, list[dict[str, Any]]],
+        tools: list[ToolMetadata],
+    ) -> list[PlanAction]:
+        """Bind grounded information dependencies to the exact plan revision."""
+        temporal_request = _requires_grounded_temporal_anchor(request, intent)
+        if temporal_request and not _grounded_temporal_anchor(context, self.timezone):
+            actions = [
+                action
+                for action in actions
+                if action.tool_name not in {"create_event", "create_task", "create_task_batch"}
+            ]
+        actions = _derive_dependencies(actions, request, intent, context, self.timezone)
+        actions = _bind_grounded_write_arguments(actions, request, context, self.timezone)
+        actions = _remove_blocked_writes(actions, request, intent, context, self.timezone)
+        self._validate(actions, tools)
+        return actions
+
+    def order_read_calls(
+        self,
+        request: str,
+        intent: UserIntent,
+        calls: list[ProposedToolCall],
+    ) -> list[ProposedToolCall]:
+        if not _requires_grounded_temporal_anchor(request, intent):
+            return calls
+        priority = {"search_mail": 0, "get_thread": 1, "get_message": 1}
+        ordered = sorted(
+            enumerate(calls),
+            key=lambda pair: (priority.get(pair[1].tool_name, 2), pair[0]),
+        )
+        return [call for _, call in ordered]
+
+    def ground_read_arguments(
+        self,
+        request: str,
+        intent: UserIntent,
+        tool_name: str,
+        arguments: dict[str, Any],
+        context: dict[str, list[dict[str, Any]]],
+        preferences: PreferenceSet | None = None,
+    ) -> dict[str, Any]:
+        grounded = dict(arguments)
+        if tool_name == "get_thread":
+            grounded_thread_id = _grounded_thread_id(context)
+            if grounded_thread_id:
+                grounded["thread_id"] = grounded_thread_id
+            elif not _request_thread_id(request):
+                # A model-provided identifier is not evidence. Remove it so
+                # the workflow records a blocked read instead of querying an
+                # arbitrary provider thread.
+                grounded.pop("thread_id", None)
+            return grounded
+
+        if tool_name not in {"list_events", "find_free_slots"}:
+            return grounded
+
+        anchor = _grounded_temporal_anchor(context, self.timezone)
+        explicit_slot = _explicit_event_slot(request, self.timezone)
+        if anchor is not None:
+            if tool_name == "list_events":
+                grounded.update(
+                    {
+                        "start": (anchor - timedelta(hours=3)).isoformat(),
+                        "end": (anchor + timedelta(hours=2)).isoformat(),
+                    }
+                )
+            else:
+                day_start = datetime.combine(anchor.date(), time(7, 0), self.timezone)
+                grounded.update(
+                    {
+                        "start": max(day_start, anchor - timedelta(hours=4)).isoformat(),
+                        "end": anchor.isoformat(),
+                    }
+                )
+        elif explicit_slot is not None and tool_name == "list_events":
+            grounded.update(explicit_slot)
+
+        if tool_name == "find_free_slots" and _argument_unavailable(
+            grounded.get("duration_minutes")
+        ):
+            default_duration = preferences.preferred_focus_block_minutes if preferences else 90
+            grounded["duration_minutes"] = _requested_duration(request, default_duration)
+        return grounded
 
     def _read_actions(self, context: dict[str, list[dict[str, Any]]]) -> list[PlanAction]:
         actions: list[PlanAction] = []
@@ -211,6 +298,48 @@ class PlanBuilder:
             tool_name="create_task_batch",
             arguments={"tasks": tasks},
             reason="The requested preparation outcome benefits from an explicit checklist.",
+            side_effecting=True,
+            status=ActionStatus.PENDING,
+        )
+
+    def _task_action(self, request: str) -> PlanAction:
+        now = datetime.now(self.timezone)
+        lowered = request.lower()
+        has_due_constraint = bool(re.search(r"\b(?:due|today|tomorrow|tonight|on)\b", lowered))
+        target_date = _task_date(request, now.date())
+        requested_time = _task_time(request)
+        due_at = datetime.combine(target_date, requested_time or time.min, self.timezone)
+        title = _task_title(request)
+        time_note = (
+            " Google Tasks preserves the due date but does not preserve an exact due time."
+            if requested_time
+            else ""
+        )
+        arguments: dict[str, Any] = {"title": title}
+        if has_due_constraint:
+            arguments["due_at"] = due_at.isoformat()
+        description = f"Create one Google Task titled “{title}”"
+        if has_due_constraint:
+            description += f" due {due_at.strftime('%b %-d, %Y')}."
+        else:
+            description += "."
+        description += time_note
+        if requested_time:
+            reason = (
+                "The user requested one task. Google Tasks stores the requested due date; "
+                "its API does not preserve a specific due time."
+            )
+        elif has_due_constraint:
+            reason = "The user requested one task with this due date."
+        else:
+            reason = "The user requested one task without a due-date constraint."
+        return PlanAction(
+            id="write-tasks-01",
+            description=description,
+            server_name="tasks",
+            tool_name="create_task",
+            arguments=arguments,
+            reason=reason,
             side_effecting=True,
             status=ActionStatus.PENDING,
         )
@@ -334,6 +463,7 @@ class PlanBuilder:
                 raise InvalidPlanError(f"Risk mismatch for tool: {action.tool_name}")
             if action.server_name != tool.server_name:
                 raise InvalidPlanError(f"Server mismatch for tool: {action.tool_name}")
+        _validate_dependencies(actions)
 
     def _format_range(self, start: str, end: str) -> str:
         start_at = datetime.fromisoformat(start)
@@ -354,12 +484,332 @@ def _latest_result(
     return matches[-1] if matches else None
 
 
+def _grounded_thread_id(
+    context: dict[str, list[dict[str, Any]]],
+) -> str | None:
+    """Choose the provider-ranked thread ID returned by the latest mail search."""
+    for record in reversed(context.get("mail", [])):
+        if record.get("tool_name") != "search_mail" or not record.get("success"):
+            continue
+        result = record.get("result") or {}
+        threads = result.get("threads") if isinstance(result, dict) else None
+        for thread in threads if isinstance(threads, list) else []:
+            if not isinstance(thread, dict):
+                continue
+            for key in ("thread_id", "threadId"):
+                value = thread.get(key)
+                if value is not None and str(value).strip():
+                    return str(value)
+    return None
+
+
+def _request_thread_id(request: str) -> str | None:
+    match = re.search(
+        r"\bthread(?:_id|\s+id)\s*[:=]\s*([A-Za-z0-9_-]+)",
+        request,
+        re.I,
+    )
+    return match.group(1) if match else None
+
+
+def _argument_unavailable(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip() or _contains_unresolved_reference(value)
+    return False
+
+
+def _requested_duration(request: str, default: int) -> int:
+    duration = _duration_from_text(request) or _hour_duration_from_text(request) or default
+    return max(15, min(duration, 480))
+
+
 def _interview_message(context: dict[str, list[dict[str, Any]]]) -> dict[str, Any] | None:
     for record in reversed(context.get("mail", [])):
         result = record.get("result") or {}
         for message in result.get("messages", []):
             if "interview" in (message.get("subject", "") + message.get("body", "")).lower():
                 return message
+    return None
+
+
+def _derive_dependencies(
+    actions: list[PlanAction],
+    request: str,
+    intent: UserIntent,
+    context: dict[str, list[dict[str, Any]]],
+    timezone: ZoneInfo,
+) -> list[PlanAction]:
+    enriched: list[PlanAction] = []
+    temporal_dependency = _requires_grounded_temporal_anchor(request, intent)
+
+    def prior(*tool_names: str) -> str | None:
+        for candidate in reversed(enriched):
+            if candidate.tool_name in tool_names:
+                return candidate.id
+        return None
+
+    for action in actions:
+        dependencies: list[str] = []
+
+        if action.tool_name == "get_thread":
+            _add_dependency(dependencies, prior("search_mail"))
+        elif action.tool_name == "read_file":
+            _add_dependency(dependencies, prior("search_files"))
+        elif action.tool_name in {"list_events", "find_free_slots"} and temporal_dependency:
+            _add_dependency(dependencies, prior("get_thread", "get_message"))
+        elif action.tool_name == "create_event":
+            _add_dependency(dependencies, prior("find_free_slots") or prior("list_events"))
+        elif action.tool_name in {"create_task", "create_task_batch"} and temporal_dependency:
+            _add_dependency(
+                dependencies,
+                prior("find_free_slots") or prior("get_thread", "get_message"),
+            )
+        elif action.tool_name == "complete_task":
+            _add_dependency(dependencies, prior("list_tasks"))
+        elif action.tool_name == "create_draft":
+            _add_dependency(dependencies, prior("get_thread", "get_message"))
+        elif action.tool_name in {"create_post_draft", "publish_post"}:
+            _add_dependency(
+                dependencies,
+                prior("read_file", "search_posts", "get_post", "get_user_posts"),
+            )
+
+        enriched.append(action.model_copy(update={"depends_on": dependencies}))
+    return enriched
+
+
+def _remove_blocked_writes(
+    actions: list[PlanAction],
+    request: str,
+    intent: UserIntent,
+    context: dict[str, list[dict[str, Any]]],
+    timezone: ZoneInfo,
+) -> list[PlanAction]:
+    """Remove writes whose grounded prerequisite did not produce usable data.
+
+    A failed read is still retained in the plan context for transparency, but a
+    side-effecting action that depends on it must never reach approval with
+    empty or model-invented arguments. This is deliberately narrow: unrelated
+    writes remain eligible when their own inputs are grounded.
+    """
+    failed_ids = {action.id for action in actions if action.status == ActionStatus.FAILED}
+    blocked_ids: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for action in actions:
+            if action.id in blocked_ids or not action.side_effecting:
+                continue
+            if any(
+                dependency in failed_ids or dependency in blocked_ids
+                for dependency in action.depends_on
+            ):
+                blocked_ids.add(action.id)
+                changed = True
+
+    if _requires_grounded_temporal_anchor(request, intent):
+        explicit_slot = _explicit_event_slot(request, timezone)
+        if explicit_slot is None:
+            free_slot_actions = {
+                action.id for action in actions if action.tool_name == "find_free_slots"
+            }
+            grounded_slots = _grounded_free_slots(context)
+            free_slot_read_failed = bool(free_slot_actions) and not grounded_slots
+            if free_slot_read_failed:
+                for action in actions:
+                    if not action.side_effecting:
+                        continue
+                    if action.tool_name == "create_event":
+                        blocked_ids.add(action.id)
+                    elif action.tool_name in {"create_task", "create_task_batch"} and (
+                        any(dependency in free_slot_actions for dependency in action.depends_on)
+                        or _contains_unresolved_reference(action.arguments)
+                    ):
+                        blocked_ids.add(action.id)
+
+    return [action for action in actions if action.id not in blocked_ids]
+
+
+def _bind_grounded_write_arguments(
+    actions: list[PlanAction],
+    request: str,
+    context: dict[str, list[dict[str, Any]]],
+    timezone: ZoneInfo,
+) -> list[PlanAction]:
+    """Bind provider-facing write fields to successful semantic read results."""
+    slots = _grounded_free_slots(context)
+    explicit_slot = _explicit_event_slot(request, timezone)
+    explicit_title = _explicit_event_title(request)
+    if not slots or explicit_slot is not None:
+        return actions
+    selected_slot = slots[0]
+    bound: list[PlanAction] = []
+    for action in actions:
+        if action.tool_name != "create_event" or not action.side_effecting:
+            bound.append(action)
+            continue
+        arguments = dict(action.arguments)
+        arguments.update(
+            {
+                "start": selected_slot.get("start"),
+                "end": selected_slot.get("end"),
+            }
+        )
+        if explicit_title:
+            arguments["title"] = explicit_title
+        bound.append(action.model_copy(update={"arguments": arguments}))
+    return bound
+
+
+def _grounded_free_slots(
+    context: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    result = _latest_result(context, "calendar", "find_free_slots") or {}
+    slots = result.get("slots")
+    return (
+        [
+            slot
+            for slot in slots
+            if isinstance(slot, dict)
+            and isinstance(slot.get("start"), str)
+            and isinstance(slot.get("end"), str)
+        ]
+        if isinstance(slots, list)
+        else []
+    )
+
+
+def _contains_unresolved_reference(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(_contains_unresolved_reference(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_unresolved_reference(item) for item in value)
+    if not isinstance(value, str):
+        return False
+    return bool(
+        re.search(
+            r"\{\{[^{}]+\}\}|\$\{[^{}]+\}|<[^>\n]*(?:latest|grounded|resolved|from|interview|slot|thread|timezone)[^>\n]*>",
+            value,
+        )
+    )
+
+
+def _add_dependency(dependencies: list[str], dependency_id: str | None) -> None:
+    if dependency_id and dependency_id not in dependencies:
+        dependencies.append(dependency_id)
+
+
+def _validate_dependencies(actions: list[PlanAction]) -> None:
+    action_ids = {action.id for action in actions}
+    positions = {action.id: index for index, action in enumerate(actions)}
+    graph: dict[str, list[str]] = {}
+    for action in actions:
+        if len(action.depends_on) != len(set(action.depends_on)):
+            raise InvalidPlanError(f"Duplicate dependencies for action: {action.id}")
+        if action.id in action.depends_on:
+            raise InvalidPlanError(f"Plan action cannot depend on itself: {action.id}")
+        missing = [dependency for dependency in action.depends_on if dependency not in action_ids]
+        if missing:
+            raise InvalidPlanError(
+                f"Plan action {action.id} references missing dependencies: {', '.join(missing)}"
+            )
+        graph[action.id] = action.depends_on
+
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(action_id: str) -> None:
+        if action_id in visiting:
+            raise InvalidPlanError("Plan dependency graph contains a cycle")
+        if action_id in visited:
+            return
+        visiting.add(action_id)
+        for dependency_id in graph[action_id]:
+            visit(dependency_id)
+        visiting.remove(action_id)
+        visited.add(action_id)
+
+    for action_id in graph:
+        visit(action_id)
+
+    for action in actions:
+        later = [
+            dependency
+            for dependency in action.depends_on
+            if positions[dependency] >= positions[action.id]
+        ]
+        if later:
+            raise InvalidPlanError(
+                f"Plan action {action.id} depends on a later action: {', '.join(later)}"
+            )
+
+
+def _requires_grounded_temporal_anchor(request: str, intent: UserIntent) -> bool:
+    domains = set(intent.information_needed)
+    if not {"mail", "calendar"}.issubset(domains):
+        return False
+    lowered = request.lower()
+    return bool(
+        re.search(r"\b(?:before|after|around|when)\b", lowered)
+        or re.search(r"\b(?:free|available)\b[^.!?]*\b(?:it|that|this)\b", lowered)
+    )
+
+
+def _grounded_temporal_anchor(
+    context: dict[str, list[dict[str, Any]]],
+    timezone: ZoneInfo,
+) -> datetime | None:
+    month_pattern = (
+        r"January|February|March|April|May|June|July|August|September|October|"
+        r"November|December"
+    )
+    named_pattern = re.compile(
+        rf"\b(?:(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+)?"
+        rf"(?P<month>{month_pattern})\s+(?P<day>\d{{1,2}})(?:,\s*(?P<year>20\d{{2}}))?"
+        rf"\s+at\s+(?P<hour>\d{{1,2}})(?::(?P<minute>\d{{2}}))?\s*(?P<period>AM|PM)\b",
+        re.I,
+    )
+    iso_pattern = re.compile(
+        r"\b(?P<year>20\d{2})-(?P<month>\d{2})-(?P<day>\d{2})"
+        r"(?:T|\s+)(?P<hour>\d{1,2}):(?P<minute>\d{2})\b"
+    )
+    now = datetime.now(timezone)
+    for record in context.get("mail", []):
+        if not record.get("success"):
+            continue
+        result = record.get("result") or {}
+        messages = result.get("messages") if isinstance(result, dict) else None
+        for message in messages if isinstance(messages, list) else []:
+            text = f"{message.get('subject', '')}\n{message.get('body', '')}"
+            named = named_pattern.search(text)
+            if named:
+                hour = int(named.group("hour")) % 12
+                if named.group("period").lower() == "pm":
+                    hour += 12
+                try:
+                    parsed = datetime.strptime(
+                        f"{named.group('month')} {named.group('day')} "
+                        f"{named.group('year') or now.year} {hour}:{named.group('minute') or '00'}",
+                        "%B %d %Y %H:%M",
+                    )
+                    return parsed.replace(tzinfo=timezone)
+                except ValueError:
+                    continue
+            iso = iso_pattern.search(text)
+            if iso:
+                try:
+                    return datetime(
+                        int(iso.group("year")),
+                        int(iso.group("month")),
+                        int(iso.group("day")),
+                        int(iso.group("hour")),
+                        int(iso.group("minute")),
+                        tzinfo=timezone,
+                    )
+                except ValueError:
+                    continue
     return None
 
 
@@ -403,6 +853,79 @@ def _feedback_removes(feedback: str, nouns: tuple[str, ...]) -> bool:
         re.search(rf"\b(?:no|remove|don't|do not)\b[^.!?]*\b{re.escape(noun)}\b", feedback)
         for noun in nouns
     )
+
+
+def _is_single_task_request(request: str) -> bool:
+    lowered = request.lower()
+    # A title can legitimately contain words such as “Tasks”; only inspect the
+    # request structure when deciding whether the user asked for one or many.
+    structure = re.sub(r"[\"“'][^\"”']*[\"”']", "", lowered)
+    if "checklist" in structure or re.search(r"\b(?:tasks|to-dos|items|steps)\b", structure):
+        return False
+    return bool(
+        re.search(r"\b(?:a|one|1)\s+(?:google\s+)?task\b", lowered)
+        or re.search(r"\bcreate\s+(?:a\s+)?(?:google\s+)?task\b", lowered)
+    )
+
+
+def _task_title(request: str) -> str:
+    quoted_matches = list(re.finditer(r"(?:called|named|titled)\s+[\"“']([^\"”']+)[\"”']", request))
+    if quoted_matches:
+        return quoted_matches[-1].group(1).strip()
+    plain_matches = list(
+        re.finditer(
+            r"(?:called|named|titled)\s+(.+?)(?=\s+(?:due|for|on|tomorrow|today)\b|[.!?]|$)",
+            request,
+            re.I,
+        )
+    )
+    return plain_matches[-1].group(1).strip() if plain_matches else "Requested task"
+
+
+def _task_time(request: str) -> time | None:
+    match = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(AM|PM)\b", request, re.I)
+    if not match:
+        return None
+    hour = int(match.group(1)) % 12
+    if match.group(3).lower() == "pm":
+        hour += 12
+    return time(hour, int(match.group(2) or 0))
+
+
+def _task_date(request: str, today: date) -> date:
+    lowered = request.lower()
+    iso_match = re.search(r"\b(20\d{2})-(\d{2})-(\d{2})\b", lowered)
+    if iso_match:
+        try:
+            return date(
+                int(iso_match.group(1)),
+                int(iso_match.group(2)),
+                int(iso_match.group(3)),
+            )
+        except ValueError:
+            pass
+    month_match = re.search(
+        r"\b(?:january|february|march|april|may|june|july|august|september|"
+        r"october|november|december)\s+(\d{1,2})(?:,\s*(20\d{2}))?\b",
+        lowered,
+    )
+    if month_match:
+        month_name = re.search(
+            r"\b(january|february|march|april|may|june|july|august|"
+            r"september|october|november|december)\b",
+            lowered,
+        )
+        if month_name:
+            try:
+                parsed = datetime.strptime(
+                    f"{month_name.group(1)} {month_match.group(1)} "
+                    f"{month_match.group(2) or today.year}",
+                    "%B %d %Y",
+                )
+                return parsed.date()
+            except ValueError:
+                pass
+    return _relative_date(lowered, today) or today
 
 
 def _duration_from_text(text: str) -> int | None:

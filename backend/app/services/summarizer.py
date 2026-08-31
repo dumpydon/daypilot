@@ -98,22 +98,26 @@ def summarize_read_only(
         or _result(context, "x", "get_post")
     )
     if x_posts is not None:
+        x_provider = str(x_posts.get("provider") or "X")
+        x_label = "demo X posts" if x_provider == "DayPilot demo" else f"{x_provider} posts"
         posts = x_posts.get("posts") if isinstance(x_posts, dict) else None
         if isinstance(posts, list) and posts:
             excerpts = [str(post.get("text", "")).strip() for post in posts[:3] if post.get("text")]
             if excerpts:
-                parts.append("Matching demo X posts: " + " ".join(excerpts))
+                parts.append(f"Matching {x_label}: " + " ".join(excerpts))
             else:
-                parts.append("Matching demo X posts did not contain readable text.")
+                parts.append(f"Matching {x_label} did not contain readable text.")
         elif x_posts.get("text"):
-            parts.append(f"The matching demo X post says: {x_posts['text']}")
+            parts.append(f"The matching {x_provider} post says: {x_posts['text']}")
         else:
             parts.append("I couldn't find grounded public X posts for that request.")
 
     if "files" in context and not files and any("file" in error.lower() for error in errors):
         parts.append("I couldn't find a grounded workspace file for that request.")
-    if "x" in context and not x_posts and any(
-        "post" in error.lower() or "x" in error.lower() for error in errors
+    if (
+        "x" in context
+        and not x_posts
+        and any("post" in error.lower() or "x" in error.lower() for error in errors)
     ):
         parts.append("I couldn't find grounded public X information for that request.")
 
@@ -136,15 +140,31 @@ def summarize_execution(
         payload = result.get("result") or {}
         tool_name = result["tool_name"]
         verified = verification_by_action.get(result["action_id"], {}).get("verified", False)
-        suffix = " (verified)" if verified else ""
+        suffix = " (verified)" if verified else " (created; verification unavailable)"
         if tool_name == "create_event":
             start = datetime.fromisoformat(payload["start_at"]).strftime("%-I:%M %p")
             end = datetime.fromisoformat(payload["end_at"]).strftime("%-I:%M %p")
             completed.append(f"Preparation block scheduled for {start}–{end}{suffix}.")
         elif tool_name == "create_task_batch":
-            completed.append(f"{payload.get('count', 0)} preparation tasks were created{suffix}.")
+            count = payload.get("count", 0)
+            failed_tasks = payload.get("failed") if isinstance(payload.get("failed"), list) else []
+            if failed_tasks:
+                completed.append(
+                    f"{count} preparation tasks were created, but "
+                    f"{len(failed_tasks)} task(s) failed."
+                )
+            else:
+                completed.append(f"{count} preparation tasks were created{suffix}.")
         elif tool_name == "create_task":
-            completed.append(f"Task “{payload.get('title')}” was created{suffix}.")
+            title = payload.get("title") or "Requested task"
+            if payload.get("requested_due_time") and payload.get("due_date"):
+                completed.append(
+                    f"Task “{title}” was created for {payload['due_date']}; "
+                    f"Google Tasks does not preserve the requested "
+                    f"{payload['requested_due_time']} due time{suffix}."
+                )
+            else:
+                completed.append(f"Task “{title}” was created{suffix}.")
         elif tool_name == "complete_task":
             completed.append(f"Task “{payload.get('title')}” was completed{suffix}.")
         elif tool_name == "create_draft":
@@ -154,7 +174,8 @@ def summarize_execution(
         elif tool_name == "create_post_draft":
             completed.append(f"An X post draft was saved for review{suffix}.")
         elif tool_name == "publish_post":
-            completed.append(f"An X post was published in the demo workspace{suffix}.")
+            provider = payload.get("provider") or "X"
+            completed.append(f"A post was published on {provider}{suffix}.")
     if failed:
         completed.append("Failed actions: " + "; ".join(failed) + ".")
     return " ".join(completed) or "No write actions were executed."

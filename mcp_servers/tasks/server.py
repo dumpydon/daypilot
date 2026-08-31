@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
-from mcp_servers.common.database import database_path_from_env
-from mcp_servers.common.store import DemoServiceStore
+from backend.app.config import Settings
+from backend.app.providers.factory import build_dynamic_service
 
 
 class TaskInput(BaseModel):
@@ -20,15 +19,13 @@ class TaskInput(BaseModel):
 mcp = FastMCP(
     "DayPilot Tasks",
     instructions=(
-        "Fictional local task list. Every mutation is designed for approval-gated clients."
+        "Tasks capability selected by DayPilot configuration. Every mutation is designed "
+        "for approval-gated clients."
     ),
     log_level="ERROR",
     json_response=True,
 )
-store = DemoServiceStore(
-    database_path_from_env(),
-    os.getenv("DAYPILOT_TIMEZONE", "Asia/Kolkata"),
-)
+store = build_dynamic_service("tasks", Settings())
 read_annotations = ToolAnnotations(
     readOnlyHint=True,
     destructiveHint=False,
@@ -45,7 +42,7 @@ write_annotations = ToolAnnotations(
 
 @mcp.tool(annotations=read_annotations)
 def list_tasks() -> dict[str, Any]:
-    """List all current demo tasks and grounded task IDs. This is read-only."""
+    """List current tasks and grounded task IDs. This is read-only."""
     return store.list_tasks()
 
 

@@ -51,7 +51,7 @@ def _receipt_for_result(
     provider = _provider_name(base_provider, payload)
     success = bool(result.get("success"))
     verified = bool(verification and verification.get("verified") is True)
-    status = _receipt_status(success, verification)
+    status = _receipt_status(success, verification, payload)
     verification_detail = _text(verification.get("detail")) if verification else None
 
     if not success:
@@ -119,23 +119,23 @@ def _task_batch_receipt(common: dict[str, Any], payload: dict[str, Any]) -> Reso
         items=items,
         details=[
             ResourceReceiptDetail(label="Count", value=str(count)),
-            *[
-                ResourceReceiptDetail(label="Task", value=item.title)
-                for item in items
-            ],
+            *[ResourceReceiptDetail(label="Task", value=item.title) for item in items],
         ],
     )
 
 
 def _task_receipt(common: dict[str, Any], payload: dict[str, Any]) -> ResourceReceipt:
     item = _task_item(payload)
+    details = [ResourceReceiptDetail(label="Task", value=item.title)]
+    if item.secondary_text:
+        details.append(ResourceReceiptDetail(label="Due", value=item.secondary_text))
     return ResourceReceipt(
         **common,
         resource_id=item.resource_id,
         title=item.title,
         secondary_text=item.secondary_text,
         items=[item],
-        details=[ResourceReceiptDetail(label="Task", value=item.title)],
+        details=details,
     )
 
 
@@ -156,7 +156,7 @@ def _completed_task_receipt(
 def _mail_receipt(common: dict[str, Any], payload: dict[str, Any]) -> ResourceReceipt:
     subject = _text(payload.get("subject"), "Untitled draft")
     recipient = _text(payload.get("recipient"))
-    secondary = f'“{subject}”'
+    secondary = f"“{subject}”"
     if recipient:
         secondary += f" · To: {recipient}"
     details = [ResourceReceiptDetail(label="Subject", value=subject)]
@@ -193,7 +193,7 @@ def _post_receipt(
 
 def _task_item(payload: dict[str, Any]) -> ResourceReceiptItem:
     title = _text(payload.get("title"), "Untitled task")
-    due_at = _text(payload.get("due_at"))
+    due_at = _text(payload.get("due_at") or payload.get("due_date"))
     secondary = f"Due {_format_date_only(due_at)}" if due_at else None
     return ResourceReceiptItem(
         resource_id=_text(payload.get("id")),
@@ -205,14 +205,19 @@ def _task_item(payload: dict[str, Any]) -> ResourceReceiptItem:
 def _receipt_status(
     success: bool,
     verification: dict[str, Any] | None,
+    payload: dict[str, Any],
 ) -> ReceiptStatus:
     if not success:
         return ReceiptStatus.FAILED
+    if payload.get("status") == "partially_created":
+        return ReceiptStatus.PARTIALLY_COMPLETED
     if verification is None:
         return ReceiptStatus.CREATED
     if verification.get("verified") is True:
         return ReceiptStatus.VERIFIED
-    return ReceiptStatus.FAILED
+    # A successful provider response with a failed/mismatched read-back is
+    # still a created resource, but it must remain visibly unverified.
+    return ReceiptStatus.CREATED
 
 
 def _provider_name(base_provider: str, payload: dict[str, Any]) -> str:

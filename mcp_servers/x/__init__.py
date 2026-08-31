@@ -1,1 +1,1 @@
-"""Fictional public X MCP server for the local DayPilot demo."""
+"""DayPilot X MCP server for demo and connected providers."""

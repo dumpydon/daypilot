@@ -1,26 +1,23 @@
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from mcp_servers.common.database import database_path_from_env
-from mcp_servers.common.store import DemoServiceStore
+from backend.app.config import Settings
+from backend.app.providers.factory import build_dynamic_service
 
 mcp = FastMCP(
     "DayPilot Calendar",
     instructions=(
-        "Fictional local calendar with timezone-aware event reads and guarded event creation."
+        "Calendar capability selected by DayPilot configuration with timezone-aware reads "
+        "and guarded event creation."
     ),
     log_level="ERROR",
     json_response=True,
 )
-store = DemoServiceStore(
-    database_path_from_env(),
-    os.getenv("DAYPILOT_TIMEZONE", "Asia/Kolkata"),
-)
+store = build_dynamic_service("calendar", Settings())
 read_annotations = ToolAnnotations(
     readOnlyHint=True,
     destructiveHint=False,

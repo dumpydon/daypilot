@@ -31,8 +31,11 @@ class Harness:
 async def harness(tmp_path: Path):
     database_path = tmp_path / "daypilot-test.db"
     settings = Settings(
+        _env_file=None,
         database_url=f"sqlite:///{database_path}",
         openai_api_key=None,
+        daypilot_demo_mode=True,
+        provider_mode="demo",
         daypilot_timezone="Asia/Kolkata",
     )
     initialize_demo_database(database_path, settings.daypilot_timezone)

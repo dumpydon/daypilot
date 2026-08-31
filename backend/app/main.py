@@ -20,20 +20,39 @@ from backend.app.domain.errors import (
 from backend.app.graph.workflow import WorkflowDependencies, build_daypilot_graph
 from backend.app.mcp.gateway import MCPGateway
 from backend.app.persistence.repository import DayPilotRepository
+from backend.app.providers.manager import ConnectionManager
 from backend.app.services.coordinator import RunCoordinator
 from backend.app.services.demo_workspace import DemoWorkspaceService
 from backend.app.services.planner import PlanBuilder
 from backend.app.services.reasoner import create_reasoner
-from mcp_servers.common.database import initialize_demo_database
+from mcp_servers.common.database import ensure_demo_database_schema, initialize_demo_database
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
-    initialize_demo_database(settings.database_path, settings.daypilot_timezone)
+    if settings.daypilot_demo_mode:
+        initialize_demo_database(settings.database_path, settings.daypilot_timezone)
+    else:
+        ensure_demo_database_schema(settings.database_path)
     repository = DayPilotRepository(settings.database_path)
     await repository.initialize()
-    gateway = MCPGateway(settings)
+    provider_defaults = {
+        service: settings.configured_provider(service)
+        for service in ("mail", "calendar", "tasks", "files", "x")
+    }
+    stored_modes = await repository.list_provider_modes()
+    if not stored_modes or (
+        not settings.daypilot_demo_mode
+        and set(stored_modes.values()) <= {"demo"}
+        and any(mode != "demo" for mode in provider_defaults.values())
+    ):
+        await repository.ensure_provider_modes(provider_defaults)
+        if stored_modes:
+            for service, mode in provider_defaults.items():
+                await repository.set_provider_mode(service, mode)
+    connections = ConnectionManager(settings, repository)
+    gateway = MCPGateway(settings, connections)
     reasoner = create_reasoner(settings)
     planner = PlanBuilder(settings.daypilot_timezone)
     async with AsyncSqliteSaver.from_conn_string(str(settings.database_path)) as checkpointer:
@@ -52,6 +71,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.settings = settings
         app.state.repository = repository
         app.state.gateway = gateway
+        app.state.connections = connections
         app.state.graph = graph
         app.state.coordinator = coordinator
         app.state.demo_workspace = demo_workspace
@@ -70,7 +90,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=False,
-    allow_methods=["GET", "POST", "PUT", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 app.include_router(router)

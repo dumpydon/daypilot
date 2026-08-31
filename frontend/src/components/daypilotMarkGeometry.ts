@@ -1,8 +1,8 @@
-export const DAYPILOT_MARK_VIEWBOX = "0 0 32 32";
+// Optical padding keeps the approved D/P silhouette centered at every size.
+export const DAYPILOT_MARK_VIEWBOX = "-17 -27 288 288";
+export const DAYPILOT_MARK_COLOR = "#3b82f6";
 
 export const DAYPILOT_MARK_PATHS = {
-  upperRoute: "M7 4c2-1 4-1 6 0l13 6c2 1 3 3 3 6s-1 5-3 6l-13 6c-2 1-4 1-6 0l-4-6c-1-2-1-4 0-6Z M10 10c2-1 4-1 6 0l6 3c1 1 1 5 0 6l-6 3c-2 1-4 1-6 0l-3-3c-1-1-1-5 0-6Z",
-  lowerRoute: "",
-  executionBody: "",
-  decision: "m16 13.6 2.4 2.4-2.4 2.4-2.4-2.4Z",
+  shell: "M0 0H138C202 0 254 52 254 117S202 234 138 234H88L110 176H141C175 176 202 150 202 117S175 60 141 60H61V114L0 158Z",
+  stem: "M0 183L108 100C119 90 133 92 142 102C154 116 148 136 131 141L109 149L26 234H0Z",
 } as const;

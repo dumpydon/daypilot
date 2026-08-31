@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -65,7 +66,7 @@ def build_daypilot_graph(dependencies: WorkflowDependencies, checkpointer: Any):
             "tools_discovered",
             EventState.COMPLETED if tools else EventState.FAILED,
             f"{len(tools)} MCP tools discovered",
-            f"{connected} of {len(gateway.catalog())} demo servers connected",
+            f"{connected} of {len(gateway.catalog())} MCP servers connected",
             {"servers": gateway.catalog()},
         )
         errors = list(state.get("errors", []))
@@ -93,21 +94,40 @@ def build_daypilot_graph(dependencies: WorkflowDependencies, checkpointer: Any):
         read_plan = await reasoner.select_read_calls(
             state["user_request"], intent, tools, preferences
         )
+        read_calls = planner.order_read_calls(state["user_request"], intent, read_plan.calls)
         context: dict[str, list[dict[str, Any]]] = {
             server_name: [] for server_name in gateway.connections
         }
         errors = list(state.get("errors", []))
         calls_made = 0
 
-        for proposed in read_plan.calls[:8]:
-            record = await _invoke_read(
-                run_id,
-                gateway,
-                repository,
+        for read_index, proposed in enumerate(read_calls[:8]):
+            grounded_arguments = planner.ground_read_arguments(
+                state["user_request"],
+                intent,
                 proposed.tool_name,
                 proposed.arguments,
-                proposed.reason,
+                context,
+                preferences,
             )
+            if _read_arguments_unavailable(gateway, proposed.tool_name, grounded_arguments):
+                record = await _blocked_read(
+                    run_id,
+                    repository,
+                    gateway,
+                    proposed.tool_name,
+                    grounded_arguments,
+                    proposed.reason,
+                )
+            else:
+                record = await _invoke_read(
+                    run_id,
+                    gateway,
+                    repository,
+                    proposed.tool_name,
+                    grounded_arguments,
+                    proposed.reason,
+                )
             calls_made += 1
             server = record.pop("server_name")
             context.setdefault(server, []).append(record)
@@ -115,21 +135,33 @@ def build_daypilot_graph(dependencies: WorkflowDependencies, checkpointer: Any):
                 errors.append(record["error"])
 
             follow_up = _read_follow_up(proposed.tool_name, record.get("result"))
+            later_read_tools = {call.tool_name for call in read_calls[read_index + 1 : 8]}
             if (
                 follow_up
                 and record["success"]
                 and calls_made < 8
                 and gateway.metadata(follow_up[0]) is not None
+                and follow_up[0] not in later_read_tools
             ):
                 follow_up_tool, follow_up_arguments, follow_up_reason = follow_up
-                follow_up_record = await _invoke_read(
-                    run_id,
-                    gateway,
-                    repository,
-                    follow_up_tool,
-                    follow_up_arguments,
-                    follow_up_reason,
-                )
+                if _read_arguments_unavailable(gateway, follow_up_tool, follow_up_arguments):
+                    follow_up_record = await _blocked_read(
+                        run_id,
+                        repository,
+                        gateway,
+                        follow_up_tool,
+                        follow_up_arguments,
+                        follow_up_reason,
+                    )
+                else:
+                    follow_up_record = await _invoke_read(
+                        run_id,
+                        gateway,
+                        repository,
+                        follow_up_tool,
+                        follow_up_arguments,
+                        follow_up_reason,
+                    )
                 calls_made += 1
                 follow_up_server = follow_up_record.pop("server_name")
                 context.setdefault(follow_up_server, []).append(follow_up_record)
@@ -173,7 +205,13 @@ def build_daypilot_graph(dependencies: WorkflowDependencies, checkpointer: Any):
             )
             if revised_writes is not None:
                 actions = [*planner.read_actions(state.get("context", {})), *revised_writes]
-                planner.validate(actions, tools)
+                actions = planner.finalize(
+                    actions,
+                    state["user_request"],
+                    intent,
+                    state.get("context", {}),
+                    tools,
+                )
             else:
                 actions = planner.build(
                     state["user_request"],
@@ -193,7 +231,13 @@ def build_daypilot_graph(dependencies: WorkflowDependencies, checkpointer: Any):
             )
             if proposed_writes is not None:
                 actions = [*planner.read_actions(state.get("context", {})), *proposed_writes]
-                planner.validate(actions, tools)
+                actions = planner.finalize(
+                    actions,
+                    state["user_request"],
+                    intent,
+                    state.get("context", {}),
+                    tools,
+                )
             else:
                 actions = planner.build(
                     state["user_request"],
@@ -422,6 +466,15 @@ def build_daypilot_graph(dependencies: WorkflowDependencies, checkpointer: Any):
                 continue
             verification = await _verify_result(state["run_id"], gateway, repository, result)
             verifications.append(verification)
+            # Read-back recovery may enrich an otherwise successful provider
+            # result with the real resource ID and URL. Persist that enrichment
+            # alongside the verification receipt.
+            await repository.complete_execution(
+                state["run_id"],
+                result["action_id"],
+                success=True,
+                result=result.get("result"),
+            )
             await repository.set_verification(state["run_id"], result["action_id"], verification)
             await repository.append_event(
                 state["run_id"],
@@ -574,6 +627,95 @@ async def _invoke_read(
         }
 
 
+async def _blocked_read(
+    run_id: str,
+    repository: DayPilotRepository,
+    gateway: MCPGateway,
+    tool_name: str,
+    arguments: dict[str, Any],
+    reason: str,
+) -> dict[str, Any]:
+    """Record a read that cannot safely run because its inputs are unresolved.
+
+    Model-selected read calls can refer to facts that only an earlier read can
+    provide (for example ``{{latest_interview_time_from_search_mail}}``). Never
+    send those placeholders to an MCP/provider adapter: keeping the failed
+    record in context lets the planner block dependent writes deterministically.
+    """
+    metadata = gateway.metadata(tool_name)
+    server_name = metadata.server_name if metadata else "unknown"
+    description = _read_description(tool_name, arguments)
+    detail = f"{tool_name} was not called because a required input was not grounded "
+    detail += "by an earlier read."
+    missing = _missing_required_arguments(metadata, arguments)
+    if missing:
+        detail = f"{tool_name} was not called because required input(s) are missing: "
+        detail += ", ".join(missing) + "."
+    await repository.append_event(
+        run_id,
+        "tool_blocked",
+        EventState.FAILED,
+        description,
+        detail,
+        {"tool_name": tool_name, "arguments": arguments, "reason": reason},
+    )
+    return {
+        "server_name": server_name,
+        "tool_name": tool_name,
+        "arguments": arguments,
+        "description": description,
+        "reason": reason,
+        "result": None,
+        "success": False,
+        "error": f"{tool_name}: {detail}",
+    }
+
+
+def _contains_unresolved_reference(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(_contains_unresolved_reference(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_unresolved_reference(item) for item in value)
+    if not isinstance(value, str):
+        return False
+    return bool(
+        re.search(
+            r"\{\{[^{}]+\}\}|\$\{[^{}]+\}|<[^>\n]*(?:latest|grounded|resolved|from|interview|slot|thread|timezone)[^>\n]*>",
+            value,
+        )
+    )
+
+
+def _read_arguments_unavailable(
+    gateway: MCPGateway,
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> bool:
+    metadata = gateway.metadata(tool_name)
+    return _contains_unresolved_reference(arguments) or bool(
+        _missing_required_arguments(metadata, arguments)
+    )
+
+
+def _missing_required_arguments(
+    metadata: Any,
+    arguments: dict[str, Any],
+) -> list[str]:
+    if metadata is None:
+        return []
+    required = metadata.input_schema.get("required", [])
+    if not isinstance(required, list):
+        return []
+    missing: list[str] = []
+    for name in required:
+        value = arguments.get(name)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing.append(str(name))
+        elif _contains_unresolved_reference(value):
+            missing.append(str(name))
+    return missing
+
+
 async def _verify_result(
     run_id: str,
     gateway: MCPGateway,
@@ -588,29 +730,88 @@ async def _verify_result(
                 "list_events",
                 {"start": payload["start_at"], "end": payload["end_at"]},
             )
-            verified = any(event["id"] == payload["id"] for event in read_back.get("events", []))
+            events = [event for event in read_back.get("events", []) if isinstance(event, dict)]
+            exact = [event for event in events if _event_matches(event, payload)]
+            provider_id = payload.get("id")
+            identified = next((event for event in exact if event.get("id") == provider_id), None)
+            if identified is None and not provider_id and len(exact) == 1:
+                identified = exact[0]
+                payload["id"] = identified.get("id")
+                payload["provider_resource_id"] = identified.get("id")
+                payload["external_url"] = identified.get("htmlLink")
+            verified = identified is not None
+            if verified:
+                detail = "Calendar event matched the approved title, time, and timezone."
+            elif len(exact) > 1:
+                detail = (
+                    "Verification read failed: multiple matching calendar events were found; "
+                    "no ID was guessed."
+                )
+            elif exact:
+                detail = (
+                    "Verification mismatch: the provider event did not match the approved "
+                    "resource ID."
+                )
+            else:
+                detail = (
+                    "Verification read failed: no calendar event matched the approved title "
+                    "and time."
+                )
+            return {
+                "action_id": result["action_id"],
+                "verified": verified,
+                "detail": detail,
+                **({"provider_resource_id": identified.get("id")} if identified else {}),
+            }
         elif tool_name in {"create_task", "create_task_batch", "complete_task"}:
             read_back = await gateway.invoke("list_tasks", {})
-            expected_ids = (
-                [task["id"] for task in payload.get("tasks", [])]
-                if tool_name == "create_task_batch"
-                else [payload["id"]]
+            expected = payload.get("tasks", []) if tool_name == "create_task_batch" else [payload]
+            expected = [task for task in expected if isinstance(task, dict)]
+            if not expected or any(not task.get("id") for task in expected):
+                return {
+                    "action_id": result["action_id"],
+                    "verified": False,
+                    "detail": (
+                        "Verification read failed: Google Tasks did not return every task ID; "
+                        "no retry was attempted."
+                    ),
+                }
+            tasks = {
+                task["id"]: task
+                for task in read_back.get("tasks", [])
+                if isinstance(task, dict) and task.get("id")
+            }
+            verified = all(
+                task["id"] in tasks and _task_matches(tasks[task["id"]], task) for task in expected
             )
-            tasks = {task["id"]: task for task in read_back.get("tasks", [])}
-            verified = all(task_id in tasks for task_id in expected_ids)
-            if tool_name == "complete_task" and expected_ids:
-                verified = verified and tasks[expected_ids[0]]["completed"]
+            if tool_name == "create_task_batch" and payload.get("status") == "partially_created":
+                verified = False
+            if tool_name == "complete_task" and expected:
+                verified = verified and tasks[expected[0]["id"]]["completed"]
         elif tool_name == "create_draft":
-            read_back = await gateway.invoke("get_message", {"message_id": payload["id"]})
-            verified = read_back.get("id") == payload["id"] and read_back.get("kind") == "draft"
+            message_id = payload.get("message_id") or payload.get("id")
+            if not message_id:
+                return {
+                    "action_id": result["action_id"],
+                    "verified": False,
+                    "detail": (
+                        "Verification read failed: Gmail did not return a draft message ID; "
+                        "no retry was attempted."
+                    ),
+                }
+            read_back = await gateway.invoke("get_message", {"message_id": message_id})
+            verified = read_back.get("id") == message_id
+            if payload.get("subject"):
+                verified = verified and read_back.get("subject") == payload["subject"]
+            if payload.get("body"):
+                verified = verified and payload["body"][:200] in str(read_back.get("body", ""))
         elif tool_name == "create_post_draft":
             read_back = await gateway.invoke("get_post", {"post_id": payload["id"]})
             verified = read_back.get("id") == payload["id"] and read_back.get("status") == "draft"
         elif tool_name == "publish_post":
             read_back = await gateway.invoke("get_post", {"post_id": payload["id"]})
             verified = (
-                read_back.get("id") == payload["id"]
-                and read_back.get("status") == "published"
+                read_back.get("id") == payload["id"] and read_back.get("status") == "published"
             )
         else:
             return {
@@ -625,12 +826,54 @@ async def _verify_result(
             if verified
             else "Read-back did not confirm the expected persisted state.",
         }
-    except Exception as exc:
+    except Exception:
         return {
             "action_id": result["action_id"],
             "verified": False,
-            "detail": f"Verification read failed: {exc}",
+            "detail": "Verification read failed: the provider could not be read back safely.",
         }
+
+
+def _event_matches(event: dict[str, Any], payload: dict[str, Any]) -> bool:
+    if str(event.get("title") or "") != str(payload.get("title") or ""):
+        return False
+    try:
+        provider_start = _instant(event.get("start_at"))
+        provider_end = _instant(event.get("end_at"))
+        approved_start = _instant(payload.get("start_at"))
+        approved_end = _instant(payload.get("end_at"))
+    except (TypeError, ValueError):
+        return False
+    return provider_start == approved_start and provider_end == approved_end
+
+
+def _task_matches(task: dict[str, Any], payload: dict[str, Any]) -> bool:
+    if str(task.get("title") or "") != str(payload.get("title") or ""):
+        return False
+    expected_due = payload.get("due_at")
+    actual_due = task.get("due_at")
+    if not expected_due:
+        return True
+    if not actual_due:
+        return False
+    try:
+        expected_date_value = str(payload.get("due_date") or expected_due).replace("Z", "+00:00")
+        expected_date = datetime.fromisoformat(expected_date_value).date()
+        actual_date = datetime.fromisoformat(str(actual_due).replace("Z", "+00:00")).date()
+    except (TypeError, ValueError):
+        return False
+    # Google Tasks has date-only due semantics; do not compare the requested
+    # wall-clock time as if the provider supported reminders at that time.
+    return expected_date == actual_date
+
+
+def _instant(value: Any) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError("missing provider datetime")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("naive provider datetime")
+    return parsed.astimezone(UTC)
 
 
 def _existing_execution_result(action: PlanAction, attempt: dict[str, Any]) -> ExecutionResult:
@@ -672,7 +915,11 @@ def _read_description(tool_name: str, arguments: dict[str, Any]) -> str:
         "get_thread": "Read matching mail thread",
         "get_message": "Read mail message",
         "list_events": "Read calendar events",
-        "find_free_slots": f"Find a {arguments.get('duration_minutes')} minute free slot",
+        "find_free_slots": (
+            f"Find a {arguments['duration_minutes']} minute free slot"
+            if arguments.get("duration_minutes")
+            else "Find a free preparation slot"
+        ),
         "list_tasks": "Review current tasks",
         "search_files": f"Search workspace files for “{arguments.get('query', '')}”",
         "list_files": "List controlled workspace files",

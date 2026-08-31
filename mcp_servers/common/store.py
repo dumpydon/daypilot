@@ -321,9 +321,7 @@ class DemoServiceStore:
         ranked: list[tuple[int, dict[str, Any]]] = []
         for row in rows:
             item = dict(row)
-            haystack = " ".join(
-                (item["filename"], item["description"], item["content"])
-            ).lower()
+            haystack = " ".join((item["filename"], item["description"], item["content"])).lower()
             filename = item["filename"].lower()
             description = item["description"].lower()
             score = sum(
@@ -399,9 +397,7 @@ class DemoServiceStore:
         ranked: list[tuple[int, dict[str, Any]]] = []
         for row in rows:
             item = dict(row)
-            haystack = " ".join(
-                (item["username"], item["display_name"], item["text"])
-            ).lower()
+            haystack = " ".join((item["username"], item["display_name"], item["text"])).lower()
             score = sum(
                 3 if _contains_token(token, item["text"].lower()) else 1
                 for token in tokens

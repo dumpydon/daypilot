@@ -1,71 +1,227 @@
 # DayPilot
 
-**An MCP-powered personal operations agent that gathers multi-service context, builds auditable plans, and requires human approval before external state changes.**
+**MCP-powered personal operations agent.**
 
-DayPilot is a production-shaped local demo of a tool-use agent rather than a chatbot. A user supplies an operational goal—such as preparing for tomorrow's interview—and watches a persisted LangGraph workflow discover tools, read mail/calendar/task context, propose exact mutations, pause for approval, execute only the approved payloads, verify the resulting state, and report what actually happened.
+DayPilot turns a natural-language operational goal into a grounded plan across
+connected services. LangGraph coordinates semantic MCP tools, reads can run
+autonomously, and every external write pauses at a persisted human approval
+checkpoint before it is executed idempotently and verified against the provider.
 
-The included workspace is fictional and clearly labeled **Demo workspace**. No personal Google account is required. A hosted demo is intentionally not deployed yet.
+## Demo
+
+Try this in the local workspace:
+
+> Find my latest email with subject “DayPilot interview test”. Determine the interview date and time from that email. Check my calendar and find a free 60-minute preparation slot before the interview. Create a calendar event called “DayPilot Interview Prep” in that free slot and create one Google Task called “Prepare for DayPilot interview”. Do not draft or send any email. Show me the proposed plan and dependency graph before making any external changes.
+
+The representative flow is:
+
+1. Search Gmail and read the matching thread.
+2. Ground the interview date, time, and timezone from the message.
+3. Read Calendar and find a free 60-minute slot before it.
+4. Show the plan and its true dependencies.
+5. Pause for approval.
+6. Create the Calendar event and Google Task exactly once.
+7. Verify both provider resources and show receipts.
+
+In demo mode this uses deterministic seeded data. In connected mode the same
+semantic MCP contract routes Mail, Calendar, and Tasks through the configured
+provider adapters.
+
+## Architecture
+
+```mermaid
+flowchart TB
+    User[User] --> UI[Next.js operations workspace]
+    UI --> API[FastAPI API + SSE]
+    API --> Graph[Persisted LangGraph workflow]
+
+    subgraph orchestration[Orchestration]
+        Intent[Understand request]
+        Discover[Discover MCP tools]
+        Gather[Gather grounded context]
+        Plan[Build dependency-aware plan]
+        Gate[Persisted HITL approval]
+        Execute[Execute approved writes once]
+        Verify[Provider read-back verification]
+        Intent --> Discover --> Gather --> Plan --> Gate --> Execute --> Verify
+    end
+    Graph --> Intent
+
+    Plan --> MCP[MultiServerMCPClient]
+    Execute --> MCP
+
+    subgraph semantic[DayPilot semantic MCP servers]
+        Mail[Mail]
+        Calendar[Calendar]
+        Tasks[Tasks]
+        Files[Files]
+        X[X]
+    end
+    MCP --> Mail
+    MCP --> Calendar
+    MCP --> Tasks
+    MCP --> Files
+    MCP --> X
+
+    subgraph providers[Provider boundary]
+        Demo[Seeded demo SQLite]
+        Managed[Composio managed Google / X]
+        Direct[Direct Google / X adapters]
+        Local[Allowlisted local Files]
+    end
+    Mail --> Demo
+    Calendar --> Demo
+    Tasks --> Demo
+    Files --> Demo
+    X --> Demo
+    Mail --> Managed
+    Calendar --> Managed
+    Tasks --> Managed
+    X --> Managed
+    Mail --> Direct
+    Calendar --> Direct
+    Tasks --> Direct
+    X --> Direct
+    Files --> Local
+
+    subgraph persistence[Durable state]
+        SQLite[(SQLite repository)]
+        Checkpoints[LangGraph checkpoints]
+        Ledger[Execution ledger + receipts]
+    end
+    Graph <--> SQLite
+    Graph <--> Checkpoints
+    Execute --> Ledger
+    Verify --> Ledger
+```
+
+DayPilot keeps orchestration separate from service capabilities:
+
+`LangGraph → MultiServerMCPClient → semantic DayPilot MCP server → provider adapter → provider`
+
+The graph never imports Gmail, Calendar, Tasks, Files, or X implementation
+functions. It discovers a stable semantic surface of **5 MCP domains and 20
+tools**.
+
+## Why MCP
+
+Provider APIs expose large, changing, provider-specific action sets. DayPilot
+keeps that complexity behind a small semantic boundary:
+
+```text
+provider-specific APIs
+        ↓
+DayPilot semantic MCP tools
+        ↓
+planner-facing capability contract
+```
+
+For example, the planner reasons about `create_event`, not a provider-specific
+Google action slug. The adapter can change without changing the graph policy or
+the user-facing workflow.
+
+## Agent workflow
 
 ```mermaid
 flowchart LR
-    UI[Next.js operations workspace] --> API[FastAPI + SSE]
-    API --> Graph[Persisted LangGraph workflow]
-    Graph --> Policy{Tool policy boundary}
-    Policy -->|autonomous reads| Client[MultiServerMCPClient]
-    Policy -->|approved exact writes| Client
-    Client <-->|stdio MCP| Mail[Mail MCP]
-    Client <-->|stdio MCP| Calendar[Calendar MCP]
-    Client <-->|stdio MCP| Tasks[Tasks MCP]
-    Client <-->|stdio MCP| Files[Files MCP]
-    Client <-->|stdio MCP| X[X MCP]
-    Graph <--> SQLite[(SQLite runs + checkpoints)]
-    Mail & Calendar & Tasks & Files & X <--> SQLite
+    A[Understand request] --> B[Discover MCP tools]
+    B --> C[Gather read-only context]
+    C --> D[Ground dependencies]
+    D --> E[Build plan]
+    E -->|no writes| F[Grounded result]
+    E -->|writes| G[Persisted approval checkpoint]
+    G --> H[Execute exact approved payloads once]
+    H --> I[Verify provider state]
+    I --> J[Receipts + summary]
 ```
 
-## Why it exists
+The typed LangGraph state carries the request, `UserIntent`, discovered tool
+metadata, service context, plan revision, approval hash, execution results,
+verification results, errors, and preferences. Historical runs reopen from
+persisted application records and LangGraph checkpoints; they do not regenerate
+plans or rerun providers.
 
-Many agent demos hide their most important behavior inside one tool-calling loop. DayPilot makes the workflow inspectable. LangGraph is used because request understanding, context gathering, planning, approval, execution, verification, and cancellation have explicit state and branches. MCP keeps service capabilities independent from orchestration: the graph never imports a service function. It discovers LangChain-compatible tools from five real MCP server processes covering communication, scheduling, tasks, private workspace documents, and public X context.
+## Human-in-the-loop safety
 
-The design is deliberately small enough to explain in an interview. There is one API service, one frontend, five local MCP adapters, one SQL repository boundary, and no vector database or multi-agent swarm.
+- Read tools are autonomous during context gathering.
+- Tool risk is code-classified; unknown tools fail closed as side effects.
+- Writes pause through LangGraph `interrupt()` and a durable checkpoint.
+- Approval is bound to the exact action IDs, tool names, arguments, dependencies,
+  and plan hash.
+- “Do it immediately” or “do not ask for approval” cannot bypass the gate.
+- The gateway rejects writes without matching persisted authorization.
 
-## Core workflow
+## Dependency-aware planning
 
-The graph runs these nodes:
+Dependencies represent real runtime data flow, not decorative arrows. In the
+interview workflow:
 
-1. `understand_request` produces a typed `UserIntent`.
-2. `discover_tools` retrieves current MCP capabilities dynamically.
-3. `gather_context` executes a bounded set of read-only tool calls.
-4. `build_plan` creates typed actions with tool, arguments, reason, risk, and status.
-5. `approval_gate` calls LangGraph `interrupt()` when writes exist.
-6. `execute_actions` runs each approved write once and records its outcome.
-7. `verify_execution` reads service state back through MCP.
-8. `summarize` reports exact successes and failures; rejection routes to `summarize_cancelled`.
+```text
+search_mail
+    ↓ grounded thread_id
+get_thread
+    ↓ grounded interview datetime
+list_events ───────┐
+find_free_slots ────┤
+        ↓ selected free slot
+create_event   create_task
+```
 
-With an `OPENAI_API_KEY`, structured OpenAI reasoning interprets requests and selects bounded read tools. Without a key, a deterministic local reasoner exercises the same graph, typed state, MCP boundary, and approval policy. This makes the golden demo and evaluations reproducible while leaving the reasoning provider replaceable.
+`thread_id`, Calendar windows, duration, and write timestamps are derived from
+successful semantic results or direct user input. Symbolic placeholders are
+never evaluated or sent to MCP. If evidence is missing or a prerequisite
+fails, dependent actions are blocked rather than fabricated.
 
-## Safety boundary
+## Connected services
 
-Read and write classifications live in an application policy registry around discovered MCP tools. Unknown tools fail closed as side effects. The context-gathering stage cannot invoke a write because the gateway rejects it without authorization.
+| Domain | Semantic tools | Current provider path |
+| --- | --- | --- |
+| Mail | `search_mail`, `get_thread`, `get_message`, `create_draft` | Demo SQLite, Composio-managed Google, or direct Gmail |
+| Calendar | `list_events`, `find_free_slots`, `create_event` | Demo SQLite, Composio-managed Google Calendar, or direct Google Calendar |
+| Tasks | `list_tasks`, `create_task`, `create_task_batch`, `complete_task` | Demo SQLite, Composio-managed Google Tasks, or direct Google Tasks |
+| Files | `search_files`, `list_files`, `get_file_metadata`, `read_file` | Seeded demo data or allowlisted local folders; read-only |
+| X | `search_posts`, `get_post`, `get_user_posts`, `create_post_draft`, `publish_post` | Demo data, direct X, or managed Composio when available |
 
-Approval is not a frontend flag. `approval_gate` persists a real LangGraph checkpoint and pauses the thread. The approve endpoint resumes that same thread with `Command(resume=...)`. Authorization is bound to a SHA-256 digest of the exact approved action IDs, tool names, and arguments. Changed arguments, missing approval, a mismatched action, or a modified plan hash are rejected in code.
+Connected Google mode uses one server-only Composio key and hosted MCP session
+for Gmail, Calendar, and Tasks. Managed X availability depends on the configured
+Composio app. Provider failures never fall back to demo data. See
+[docs/connected-mode.md](docs/connected-mode.md) for the connection lifecycle.
 
-Each write gets a unique execution record before invocation. Duplicate resumes do not repeat it. An interrupted write with an unknown outcome is surfaced rather than retried. Successful calendar, task, and draft mutations are verified using read tools. The agent can act only through declared MCP capabilities; arbitrary Python and shell execution are never exposed.
+## Verification and idempotency
 
-## Local demo services
+Each approved write gets an execution-ledger row before invocation. A duplicate
+resume reuses that record instead of issuing a second mutation. Successful
+Calendar, Tasks, Mail draft, and X mutations are normalized into semantic
+results, read back through MCP where supported, and projected into verified,
+created-unverified, or failed receipts. An interrupted write with an unknown
+outcome is surfaced and is not blindly retried.
 
-- **Mail MCP:** `search_mail`, `get_thread`, `get_message`, `create_draft`
-- **Calendar MCP:** `list_events`, `find_free_slots`, `create_event`
-- **Tasks MCP:** `list_tasks`, `create_task`, `create_task_batch`, `complete_task`
-- **Files MCP:** `search_files`, `list_files`, `get_file_metadata`, `read_file`
-- **X MCP:** `search_posts`, `get_post`, `get_user_posts`, `create_post_draft`, `publish_post`
+## Evaluation
 
-Files and X use small fictional local demo corpora. Files are read-only and accept only controlled file IDs; X reads are autonomous while draft creation and publishing remain approval-gated writes.
+The deterministic evaluation suite currently covers **20 scenarios** across all
+five semantic domains. The latest verified run reports:
 
-The seeded golden prompt is: **“Prepare me for my interview with Rahul tomorrow.”** Mail contains a fictional confirmation for 11:00 AM, the calendar has morning commitments and free evening time, and tasks contain unrelated work. DayPilot proposes a 7:00–8:30 PM preparation block, four tasks, and a saved follow-up draft, then waits. Approval creates and verifies all three changes.
+- Scenario pass rate: **20/20 (100%)**
+- Dependency accuracy: **100%**
+- Approval correctness: **100%**
+- Execution success: **100%**
+- Unauthorized-write rate: **0%**
+
+Evaluation and provider tests use isolated databases or fakes; real connected
+provider writes are never part of automated evaluation.
+
+## Tech stack
+
+- **Frontend:** Next.js 16, React 19, TypeScript, Vitest
+- **Backend:** FastAPI, Python, Pydantic, Uvicorn
+- **Agent:** LangGraph, LangChain, OpenAI structured reasoning
+- **Integration:** MCP, `langchain-mcp-adapters`, Composio managed sessions
+- **Persistence:** SQLite, `aiosqlite`, LangGraph SQLite checkpoints
+- **Quality:** Pytest, Ruff, ESLint, TypeScript, deterministic evaluations
 
 ## Run locally
 
-Requirements are Python 3.11+ and Node.js 20+.
+Prerequisites: Python 3.13 (the `Makefile` uses `python3.13`) and Node.js 20+.
 
 ```bash
 make install
@@ -73,21 +229,103 @@ cp .env.example .env
 make dev
 ```
 
-Open `http://localhost:3000`. The API runs at `http://localhost:8000`; its OpenAPI schema is available at `/docs`. `make reset-demo` restores the fictional service records. Use `OPENAI_API_KEY` only if you want model-backed structured reasoning; the complete demo runs without it. `LANGSMITH_API_KEY` and `LANGSMITH_TRACING=true` optionally enable traces for graph nodes and LangChain/MCP calls.
+Open [http://localhost:3000](http://localhost:3000). The API runs at
+[http://localhost:8000](http://localhost:8000), with OpenAPI docs at
+[http://localhost:8000/docs](http://localhost:8000/docs).
 
-## Quality and evaluation
+The default `.env.example` configuration is deterministic demo mode and does
+not require an OpenAI or provider key. Use `make reset-demo` to restore the
+seeded Mail, Calendar, Tasks, Files, and X workspace without deleting DayPilot
+run history or preferences.
+
+## Configuration
+
+Copy `.env.example` to `.env`; it contains placeholders only. The settings most
+people need are:
+
+```dotenv
+DAYPILOT_DEMO_MODE=true
+DAYPILOT_PROVIDER_MODE=managed
+DAYPILOT_TIMEZONE=Asia/Kolkata
+DATABASE_URL=sqlite:///./data/daypilot.db
+OPENAI_API_KEY=
+COMPOSIO_API_KEY=
+NEXT_PUBLIC_API_URL=http://localhost:8000
+```
+
+Set `DAYPILOT_DEMO_MODE=false` and provide `COMPOSIO_API_KEY` for managed
+Google connectivity, then connect accounts from Preferences. Optional
+`LANGSMITH_TRACING` / `LANGSMITH_API_KEY` enable tracing. Local Files requires
+an explicit allowlisted folder in Preferences. Never put provider secrets in
+`NEXT_PUBLIC_*` variables.
+
+## Project structure
+
+```text
+backend/
+  app/
+    graph/          LangGraph state and workflow
+    mcp/            MCP gateway and tool policy
+    providers/      Managed, direct, and local adapters
+    services/       Planner, reasoner, coordinator, receipts
+    domain/         Typed models and errors
+    persistence/    SQLite repository
+  tests/            Workflow, safety, provider, and dependency regressions
+frontend/
+  src/components/  Operations workspace and graph UI
+  src/lib/          API client, types, presentation helpers
+mcp_servers/
+  common/           Shared demo schema, seed, and store
+  mail/ calendar/ tasks/ files/ x/
+evaluation/         Deterministic scenario suite
+docs/               Architecture, demo, connected mode, and interview notes
+scripts/            Local development runner
+```
+
+## Testing
 
 ```bash
-make test       # Pytest and Vitest
-make lint       # Ruff, ESLint, TypeScript
-make eval       # deterministic agent scenarios across all five MCP domains
+make test
+make lint
+make eval
 cd frontend && npm run build
 ```
 
-Evaluations cover calendar and mail reads, free-slot discovery, scheduling, checklist creation, draft creation, task completion, and the golden workflow. They measure tool-selection accuracy, plan validity, approval correctness, execution success, and unauthorized-write rate. The last metric must remain exactly zero.
+For a single layer:
 
-## Persistence and deployment scope
+```bash
+./.venv/bin/pytest -q backend/tests
+cd frontend && npm test -- --run
+```
 
-SQLite stores application runs, semantic events, preferences, write records, demo-service state, and LangGraph checkpoints. SQL access is isolated in a repository so a PostgreSQL adapter can replace it; LangGraph's async SQLite checkpointer can likewise be exchanged for `AsyncPostgresSaver`. MCP connection configuration already separates transport from the graph, allowing hosted streamable HTTP servers later.
+## Engineering decisions
 
-The frontend is compatible with standard Next.js hosting and the FastAPI service is Render-style deployable. External Gmail/Google Calendar adapters, authentication, sending email, billing, RAG, and automatic deployment are intentionally outside V1. Real integrations can replace demo MCP servers without changing graph policy or node structure.
+1. **Semantic MCP boundary:** provider-specific action churn stays outside the
+   planner-facing contract.
+2. **Code-enforced risk policy:** approval cannot be bypassed by prompt wording
+   or a model-selected tool.
+3. **Persisted HITL:** approval survives refreshes and resumes the same graph
+   checkpoint rather than relying on UI state.
+4. **Grounded dependencies:** downstream arguments come from typed semantic
+   results, never symbolic placeholder evaluation.
+5. **Verification plus idempotency:** external mutations are recorded, not
+   blindly retried, and read back when practical.
+
+## Status and limitations
+
+- This is a portfolio-grade local operations system, not a multi-tenant SaaS.
+- Demo mode is fully seeded and deterministic; connected mode requires the
+  user's own provider authorization.
+- Local Files is read-only and requires explicit folder allowlisting.
+- Google Tasks stores due dates; exact due times are not preserved by the
+  provider API.
+- X managed connectivity may be unavailable depending on Composio app support.
+- Some provider responses can be reported as created-unverified when they do not
+  return enough stable information for deterministic read-back correlation.
+
+## Further reading
+
+- [Architecture deep dive](docs/architecture.md)
+- [Safe demo walkthrough](docs/demo.md)
+- [Connected mode setup](docs/connected-mode.md)
+- [Project and interview notes](docs/project-notes.md)

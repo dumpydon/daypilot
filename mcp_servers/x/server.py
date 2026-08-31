@@ -1,27 +1,23 @@
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from mcp_servers.common.database import database_path_from_env
-from mcp_servers.common.store import DemoServiceStore
+from backend.app.config import Settings
+from backend.app.providers.factory import build_dynamic_service
 
 mcp = FastMCP(
     "DayPilot X",
     instructions=(
-        "Fictional public X demo data. Reads expose grounded public posts. Draft creation "
-        "and publishing modify the local demo store and require client-side human approval."
+        "X capability selected by DayPilot configuration. Reads expose grounded public posts. "
+        "Draft creation and publishing require human approval."
     ),
     log_level="ERROR",
     json_response=True,
 )
-store = DemoServiceStore(
-    database_path_from_env(),
-    os.getenv("DAYPILOT_TIMEZONE", "Asia/Kolkata"),
-)
+store = build_dynamic_service("x", Settings())
 read_annotations = ToolAnnotations(
     readOnlyHint=True,
     destructiveHint=False,
@@ -38,19 +34,19 @@ write_annotations = ToolAnnotations(
 
 @mcp.tool(annotations=read_annotations)
 def search_posts(query: str, limit: int = 10) -> dict[str, Any]:
-    """Search fictional public X posts by text or author."""
+    """Search public X posts by text or author."""
     return store.search_posts(query, limit)
 
 
 @mcp.tool(annotations=read_annotations)
 def get_post(post_id: str) -> dict[str, Any]:
-    """Read one grounded public post or DayPilot demo draft by ID."""
+    """Read one grounded public post or DayPilot draft by ID."""
     return store.get_post(post_id)
 
 
 @mcp.tool(annotations=read_annotations)
 def get_user_posts(username: str, limit: int = 10) -> dict[str, Any]:
-    """Read fictional public posts for one known demo username."""
+    """Read public posts for one X username."""
     return store.get_user_posts(username, limit)
 
 
@@ -62,7 +58,7 @@ def create_post_draft(text: str) -> dict[str, Any]:
 
 @mcp.tool(annotations=write_annotations)
 def publish_post(text: str, draft_id: str | None = None) -> dict[str, Any]:
-    """Publish a post into the fictional local X store after approval."""
+    """Publish a post to X after approval."""
     return store.publish_post(text, draft_id)
 
 
