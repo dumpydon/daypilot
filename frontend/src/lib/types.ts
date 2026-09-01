@@ -23,6 +23,7 @@ export type EventState =
 
 export interface UserIntent {
   goal: string;
+  request_kind: "general" | "research" | "personal" | "hybrid";
   people: string[];
   date_constraints: string[];
   requested_outcomes: string[];
@@ -34,7 +35,7 @@ export interface UserIntent {
     | "x_draft"
     | "x_publish"
   >;
-  information_needed: Array<"mail" | "calendar" | "tasks" | "files" | "x">;
+  information_needed: Array<"web" | "mail" | "calendar" | "tasks" | "files" | "x">;
 }
 
 export interface ToolMetadata {

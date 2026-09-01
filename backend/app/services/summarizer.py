@@ -112,12 +112,52 @@ def summarize_read_only(
         else:
             parts.append("I couldn't find grounded public X posts for that request.")
 
-    if "files" in context and not files and any("file" in error.lower() for error in errors):
+    web = _result(context, "web", "search_web")
+    web_records = context.get("web", [])
+    if web is not None:
+        answer = str(web.get("answer") or "").strip()
+        sources = web.get("sources") if isinstance(web.get("sources"), list) else []
+        if answer:
+            parts.append(answer)
+        elif sources:
+            snippets = [
+                str(source.get("snippet") or "").strip()
+                for source in sources[:3]
+                if isinstance(source, dict) and source.get("snippet")
+            ]
+            if snippets:
+                parts.append(" ".join(snippets))
+        if sources:
+            rendered = [
+                f"{source.get('title')}: {source.get('url')}"
+                for source in sources[:4]
+                if isinstance(source, dict) and source.get("title") and source.get("url")
+            ]
+            if rendered:
+                parts.append("Sources: " + "; ".join(rendered) + ".")
+    elif web_records:
+        web_error = next(
+            (
+                str(record.get("error"))
+                for record in web_records
+                if not record.get("success") and record.get("error")
+            ),
+            None,
+        )
+        if web_error:
+            web_error = re.sub(r"^search_web:\s*", "", web_error)
+            web_error = re.sub(r"^Error executing tool search_web:\s*", "", web_error)
+            parts.append(web_error)
+
+    if context.get("files") and not files and any("file" in error.lower() for error in errors):
         parts.append("I couldn't find a grounded workspace file for that request.")
     if (
-        "x" in context
+        context.get("x")
         and not x_posts
-        and any("post" in error.lower() or "x" in error.lower() for error in errors)
+        and any(
+            "post" in error.lower() or "x mcp" in error.lower() or "x provider" in error.lower()
+            for error in errors
+        )
     ):
         parts.append("I couldn't find grounded public X information for that request.")
 

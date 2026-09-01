@@ -127,7 +127,14 @@ class PlanBuilder:
     ) -> list[ProposedToolCall]:
         if not _requires_grounded_temporal_anchor(request, intent):
             return calls
-        priority = {"search_mail": 0, "get_thread": 1, "get_message": 1}
+        priority = {
+            "search_mail": 0,
+            "get_thread": 1,
+            "get_message": 1,
+            "search_web": 2,
+            "list_events": 3,
+            "find_free_slots": 3,
+        }
         ordered = sorted(
             enumerate(calls),
             key=lambda pair: (priority.get(pair[1].tool_name, 2), pair[0]),
@@ -144,6 +151,14 @@ class PlanBuilder:
         preferences: PreferenceSet | None = None,
     ) -> dict[str, Any]:
         grounded = dict(arguments)
+        if tool_name == "search_web":
+            if intent.request_kind == "hybrid" and "mail" in intent.information_needed:
+                company = _grounded_company(context)
+                if company:
+                    grounded["query"] = f"{company} company background and recent news"
+                elif _generic_company_research_request(request):
+                    grounded.pop("query", None)
+            return grounded
         if tool_name == "get_thread":
             grounded_thread_id = _grounded_thread_id(context)
             if grounded_thread_id:
@@ -503,6 +518,40 @@ def _grounded_thread_id(
     return None
 
 
+def _grounded_company(
+    context: dict[str, list[dict[str, Any]]],
+) -> str | None:
+    suffix_pattern = r"Labs|Inc|LLC|Ltd|Limited|Corp|Corporation|Company|Technologies|Systems|Group"
+    pattern = re.compile(
+        rf"\b([A-Z][A-Za-z0-9&.-]*(?:\s+[A-Z][A-Za-z0-9&.-]*){{0,3}}\s+"
+        rf"(?:{suffix_pattern}))\b"
+    )
+    for record in reversed(context.get("mail", [])):
+        if record.get("tool_name") not in {"get_thread", "get_message"} or not record.get(
+            "success"
+        ):
+            continue
+        result = record.get("result") or {}
+        messages = result.get("messages") if isinstance(result, dict) else None
+        candidates = messages if isinstance(messages, list) else [result]
+        for message in candidates:
+            if not isinstance(message, dict):
+                continue
+            text = "\n".join(str(message.get(key) or "") for key in ("subject", "body", "sender"))
+            match = pattern.search(text)
+            if match:
+                return match.group(1)
+    return None
+
+
+def _generic_company_research_request(request: str) -> bool:
+    lowered = request.lower()
+    return bool(
+        re.search(r"\bresearch\s+(?:the\s+)?company\b", lowered)
+        and not re.search(r"\bresearch\s+(?:the\s+)?company\s+[A-Z0-9]", request)
+    )
+
+
 def _request_thread_id(request: str) -> str | None:
     match = re.search(
         r"\bthread(?:_id|\s+id)\s*[:=]\s*([A-Za-z0-9_-]+)",
@@ -555,6 +604,9 @@ def _derive_dependencies(
 
         if action.tool_name == "get_thread":
             _add_dependency(dependencies, prior("search_mail"))
+        elif action.tool_name == "search_web" and intent.request_kind == "hybrid":
+            if "mail" in intent.information_needed:
+                _add_dependency(dependencies, prior("get_thread", "get_message"))
         elif action.tool_name == "read_file":
             _add_dependency(dependencies, prior("search_files"))
         elif action.tool_name in {"list_events", "find_free_slots"} and temporal_dependency:

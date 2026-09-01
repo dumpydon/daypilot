@@ -12,7 +12,7 @@ flowchart LR
     API --> Coordinator[RunCoordinator]
     Coordinator --> Graph[LangGraph]
     Graph --> Gateway[MCPGateway]
-    Gateway --> Servers[Five semantic MCP servers]
+    Gateway --> Servers[Six semantic MCP servers]
     Servers --> Adapters[Demo / managed / direct adapters]
     Adapters --> Providers[Google, X, or local filesystem]
     Graph <--> Repo[DayPilotRepository]
@@ -76,7 +76,7 @@ run can be reopened without calling the model or providers again.
 
 ## MCP capability boundary
 
-The five local MCP servers expose a stable semantic contract:
+The six local MCP servers expose a stable semantic contract:
 
 ```text
 mail      search_mail, get_thread, get_message, create_draft
@@ -84,6 +84,7 @@ calendar  list_events, find_free_slots, create_event
 tasks     list_tasks, create_task, create_task_batch, complete_task
 files     search_files, list_files, get_file_metadata, read_file
 x         search_posts, get_post, get_user_posts, create_post_draft, publish_post
+web       search_web
 ```
 
 The server process selects a service adapter at call time. Demo mode uses the

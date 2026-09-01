@@ -1,11 +1,11 @@
-import { AtSign, CalendarDays, ChevronDown, Files, ListChecks, Mail, PlugZap } from "lucide-react";
+import { AtSign, CalendarDays, ChevronDown, Files, Globe2, ListChecks, Mail, PlugZap } from "lucide-react";
 import { type Ref, useState } from "react";
 
 import type { ToolCatalog } from "@/lib/types";
 
 import styles from "./workspace.module.css";
 
-const icons = { mail: Mail, calendar: CalendarDays, tasks: ListChecks, files: Files, x: AtSign };
+const icons = { web: Globe2, mail: Mail, calendar: CalendarDays, tasks: ListChecks, files: Files, x: AtSign };
 
 interface ToolInspectorProps {
   catalog: ToolCatalog;

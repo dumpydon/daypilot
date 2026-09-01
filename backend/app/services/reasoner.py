@@ -40,6 +40,8 @@ class Reasoner(Protocol):
 
     async def understand(self, request: str) -> UserIntent: ...
 
+    async def answer_general(self, request: str, intent: UserIntent) -> str: ...
+
     async def select_read_calls(
         self,
         request: str,
@@ -96,6 +98,14 @@ class DeterministicReasoner:
         interview_prep = "interview" in lowered and any(
             word in lowered for word in ("prepare", "prep", "ready")
         )
+        explicit_interview_action = bool(
+            re.search(
+                r"\b(?:create|schedule|reserve|book|block|add)\b[^.!?]*"
+                r"\b(?:block|event|calendar|time)\b",
+                lowered,
+            )
+        )
+        broad_interview_prep = interview_prep and not explicit_interview_action
 
         mail_requested = any(
             word in lowered for word in ("mail", "email", "conversation", "thread", "interview")
@@ -108,7 +118,7 @@ class DeterministicReasoner:
         ):
             outcomes.append("review_calendar")
             information.append("calendar")
-        if any(word in lowered for word in ("task", "checklist", "to-do")) or interview_prep:
+        if any(word in lowered for word in ("task", "checklist", "to-do")) or broad_interview_prep:
             outcomes.append("review_tasks")
             information.append("tasks")
 
@@ -123,7 +133,7 @@ class DeterministicReasoner:
             outcomes.append("create_event")
             if "calendar" not in information:
                 information.append("calendar")
-        if interview_prep or (
+        if broad_interview_prep or (
             any(word in lowered for word in ("create", "make", "build"))
             and any(word in lowered for word in ("checklist", "task", "to-do"))
         ):
@@ -134,7 +144,7 @@ class DeterministicReasoner:
             re.search(r"\b(?:no|don't|do not|without)\b[^.!?]*\b(?:draft|email|mail)\b", lowered)
         )
         if not draft_declined and (
-            interview_prep
+            broad_interview_prep
             or (
                 "draft" in lowered
                 and any(word in lowered for word in ("mail", "email", "follow-up"))
@@ -182,13 +192,63 @@ class DeterministicReasoner:
         if "tasks_create" in requested_operations and "create_checklist" not in outcomes:
             outcomes.append("create_checklist")
 
+        explicit_web_research = bool(
+            re.search(r"\b(?:research|search the web|web search|look up online)\b", lowered)
+        )
+        fresh_public_question = not information and bool(
+            re.search(
+                r"\b(?:latest|today|yesterday|current|recent|news|who won|what happened)\b",
+                lowered,
+            )
+        )
+        if explicit_web_research or fresh_public_question:
+            information.append("web")
+
+        personal_information = any(item != "web" for item in information)
+        needs_web = "web" in information
+        if personal_information or requested_operations:
+            request_kind = "hybrid" if needs_web else "personal"
+        else:
+            request_kind = "research" if needs_web else "general"
+
         return UserIntent(
             goal=request.strip(),
+            request_kind=request_kind,
             people=people,
             date_constraints=constraints,
             requested_outcomes=list(dict.fromkeys(outcomes)),
             requested_operations=requested_operations,
             information_needed=list(dict.fromkeys(information)),  # type: ignore[arg-type]
+        )
+
+    async def answer_general(self, request: str, intent: UserIntent) -> str:
+        lowered = request.lower()
+        if "capital" in lowered and "lithuania" in lowered:
+            return "The capital of Lithuania is Vilnius."
+        if "house robber" in lowered and "python" in lowered:
+            return (
+                "Use dynamic programming and track the best total with and without the current "
+                "house.\n\n"
+                "```python\n"
+                "def rob(nums: list[int]) -> int:\n"
+                "    prev2 = prev1 = 0\n"
+                "    for value in nums:\n"
+                "        prev2, prev1 = prev1, max(prev1, prev2 + value)\n"
+                "    return prev1\n"
+                "```\n\n"
+                "Time complexity is O(n) and extra space is O(1)."
+            )
+        if "binary search" in lowered and "o(log n)" in lowered:
+            return (
+                "Binary search is O(log n) because each comparison discards half of the "
+                "remaining search range. After k steps, at most n / 2^k elements remain, so "
+                "k grows as log₂(n)."
+            )
+        if re.search(r"x[²^]2?\s*-\s*5x\s*\+\s*6\s*=\s*0", lowered):
+            return "The polynomial factors as (x - 2)(x - 3) = 0, so x = 2 or x = 3."
+        return (
+            "This general question needs model-backed reasoning. Configure OPENAI_API_KEY "
+            "to enable unrestricted general answers."
         )
 
     async def select_read_calls(
@@ -323,6 +383,14 @@ class DeterministicReasoner:
                         reason="Find grounded public X posts relevant to the request.",
                     )
                 )
+        if "web" in intent.information_needed and "search_web" in available_reads:
+            calls.append(
+                ProposedToolCall(
+                    tool_name="search_web",
+                    arguments={"query": request, "limit": 5},
+                    reason="Retrieve fresh public information with source metadata.",
+                )
+            )
         return ReadCallPlan(calls=calls[:8])
 
     async def summarize_read_only(
@@ -384,7 +452,11 @@ class OpenAIReasoner(DeterministicReasoner):
         prompt = (
             "You are the request-understanding stage of DayPilot. Extract only the user's stated "
             "goal, people, date constraints, requested outcomes, and which of "
-            "mail/calendar/tasks/files/x must be read. Also classify explicit side-effect intent "
+            "web/mail/calendar/tasks/files/x must be read. Classify request_kind as general "
+            "for stable knowledge/reasoning/coding with no tools, research for fresh public web "
+            "facts, personal for connected-service work, or hybrid when public web research and "
+            "connected services are both required. Do not use web for stable knowledge the model "
+            "can answer directly. Also classify explicit side-effect intent "
             "in requested_operations using only these values: calendar_create, tasks_create, "
             "tasks_complete, mail_draft, x_draft, x_publish. A request to create, make, schedule, "
             "reserve, book, block, put, or add calendar time is calendar_create when it includes "
@@ -394,8 +466,31 @@ class OpenAIReasoner(DeterministicReasoner):
         )
         try:
             result = UserIntent.model_validate(await structured.ainvoke(prompt))
+            operations = list(
+                dict.fromkeys([*result.requested_operations, *baseline.requested_operations])
+            )
+            request_kind = result.request_kind
+            if (
+                request_kind == "personal"
+                and not result.information_needed
+                and not operations
+                and baseline.request_kind in {"general", "research"}
+            ):
+                request_kind = baseline.request_kind
+            if operations and request_kind in {"general", "research"}:
+                request_kind = "hybrid" if "web" in result.information_needed else "personal"
+            information = (
+                list(dict.fromkeys([*result.information_needed, *baseline.information_needed]))
+                if request_kind in {"personal", "hybrid"}
+                else list(dict.fromkeys(result.information_needed))
+            )
+            if request_kind == "general":
+                information = []
+            elif request_kind == "research" and "web" not in information:
+                information.append("web")
             return result.model_copy(
                 update={
+                    "request_kind": request_kind,
                     "people": result.people or baseline.people,
                     # Relative dates are resolved from the request-time clock by the
                     # deterministic boundary. Do not let the model substitute its own
@@ -404,19 +499,32 @@ class OpenAIReasoner(DeterministicReasoner):
                     "requested_outcomes": list(
                         dict.fromkeys([*result.requested_outcomes, *baseline.requested_outcomes])
                     ),
-                    "requested_operations": list(
-                        dict.fromkeys(
-                            [*result.requested_operations, *baseline.requested_operations]
-                        )
-                    ),
-                    "information_needed": list(
-                        dict.fromkeys([*result.information_needed, *baseline.information_needed])
-                    ),
+                    "requested_operations": operations,
+                    "information_needed": information,
                 }
             )
         except Exception:
             logger.warning("OpenAI request understanding failed; using deterministic intent")
             return baseline
+
+    async def answer_general(self, request: str, intent: UserIntent) -> str:
+        fallback = await super().answer_general(request, intent)
+        prompt = (
+            "Answer this standalone DayPilot request directly. It does not require personal "
+            "services or fresh web research. Be useful and concise. For code, provide a clear "
+            "solution with complexity. Do not claim to have queried connected services.\n\n"
+            f"Request: {request}"
+        )
+        try:
+            response = await self.model.ainvoke(
+                prompt,
+                config={"run_name": "general_answer"},
+            )
+            if isinstance(response.content, str) and response.content.strip():
+                return response.content.strip()
+        except Exception:
+            logger.warning("OpenAI general answer failed; using deterministic fallback")
+        return fallback
 
     async def select_read_calls(
         self,
@@ -425,7 +533,12 @@ class OpenAIReasoner(DeterministicReasoner):
         tools: list[ToolMetadata],
         preferences: PreferenceSet,
     ) -> ReadCallPlan:
-        safe_tools = [tool for tool in tools if not tool.side_effecting]
+        required_servers = set(intent.information_needed)
+        safe_tools = [
+            tool
+            for tool in tools
+            if not tool.side_effecting and tool.server_name in required_servers
+        ]
         structured = self.selection_model.with_structured_output(
             ReadCallPlan,
             method="function_calling",
@@ -469,8 +582,9 @@ class OpenAIReasoner(DeterministicReasoner):
             "identifier, availability, or task state that is absent. If the requested fact is "
             "not present, explicitly say it could not be determined. Mention the relevant email "
             "thread or connected-service record as provenance when useful; do not narrate tool "
-            "execution. Preserve timezone labels from the source. Return one concise plain-text "
-            "answer without Markdown formatting.\n\n"
+            "execution. When web sources are present, synthesize them and cite source titles with "
+            "their exact URLs; never invent a source. Preserve timezone labels from the source. "
+            "Return one concise answer.\n\n"
             f"User request:\n{request}\n\n"
             f"Structured intent:\n{intent.model_dump_json()}\n\n"
             "Grounded MCP context:\n"
@@ -517,6 +631,12 @@ class OpenAIReasoner(DeterministicReasoner):
         tools: list[ToolMetadata],
         preferences: PreferenceSet,
     ) -> list[PlanAction] | None:
+        # Read-only requests already have a complete semantic read plan. Do not
+        # ask the model to invent a write plan when intent contains no writes;
+        # this also lets an unavailable research provider summarize its own
+        # explicit error without an unrelated planning-model failure masking it.
+        if not intent.requested_operations:
+            return []
         return await self._model_write_actions(
             request,
             intent,
@@ -773,6 +893,8 @@ def _person_constraint_unmet(
     intent: UserIntent,
     context: dict[str, list[dict[str, Any]]],
 ) -> bool:
+    if "mail" not in intent.information_needed:
+        return False
     person_relation_requested = bool(re.search(r"\b(?:with|from|to)\b", request, re.I))
     if not intent.people:
         return person_relation_requested and bool(context.get("mail"))

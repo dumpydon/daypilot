@@ -391,15 +391,17 @@ def test_mcp_service_selection_stays_dynamic_and_fail_closed(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_connected_mode_keeps_all_twenty_mcp_tools_discoverable(tmp_path: Path) -> None:
+async def test_connected_mode_keeps_all_semantic_mcp_tools_discoverable(tmp_path: Path) -> None:
     settings = settings_for(tmp_path)
     repository = await initialized_repository(settings)
     gateway = MCPGateway(settings)
 
     tools = await gateway.discover(force=True)
 
-    assert len(tools) == 20
-    assert all(server["connected"] for server in gateway.catalog())
+    assert len(tools) == 21
+    catalog = {server["name"]: server for server in gateway.catalog()}
+    assert all(catalog[name]["connected"] for name in ("mail", "calendar", "tasks", "files", "x"))
+    assert catalog["web"]["provider_state"] == "unavailable"
     assert (await repository.list_provider_modes())["mail"] == "gmail"
 
 

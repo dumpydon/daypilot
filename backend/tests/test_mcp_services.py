@@ -97,7 +97,7 @@ def test_x_draft_and_publish_persist_in_the_demo_store(store: DemoServiceStore) 
 
 
 @pytest.mark.asyncio
-async def test_gateway_discovers_five_independent_mcp_servers(tmp_path: Path) -> None:
+async def test_gateway_discovers_six_independent_mcp_servers(tmp_path: Path) -> None:
     database_path = tmp_path / "gateway.db"
     initialize_demo_database(database_path, "Asia/Kolkata")
     settings = Settings(
@@ -113,6 +113,7 @@ async def test_gateway_discovers_five_independent_mcp_servers(tmp_path: Path) ->
         "tasks",
         "files",
         "x",
+        "web",
     ]
-    assert len(tools) == 20
+    assert len(tools) == 21
     assert all(server["connected"] for server in gateway.catalog())

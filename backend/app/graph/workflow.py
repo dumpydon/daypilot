@@ -58,6 +58,27 @@ def build_daypilot_graph(dependencies: WorkflowDependencies, checkpointer: Any):
             "updated_at": _now(),
         }
 
+    async def answer_general(state: DayPilotState) -> dict[str, Any]:
+        intent = UserIntent.model_validate(state["intent"])
+        answer = await reasoner.answer_general(state["user_request"], intent)
+        await repository.finish_run(state["run_id"], answer)
+        await repository.append_event(
+            state["run_id"],
+            "general_answer_generated",
+            EventState.COMPLETED,
+            "Answer ready",
+            answer,
+            {"request_kind": intent.request_kind},
+        )
+        await repository.append_event(
+            state["run_id"],
+            "run_completed",
+            EventState.COMPLETED,
+            "Run completed",
+            answer,
+        )
+        return {"final_summary": answer, "updated_at": _now()}
+
     async def discover_tools(state: DayPilotState) -> dict[str, Any]:
         tools = await gateway.discover(force=True)
         connected = sum(server["connected"] for server in gateway.catalog())
@@ -489,7 +510,17 @@ def build_daypilot_graph(dependencies: WorkflowDependencies, checkpointer: Any):
     async def summarize(state: DayPilotState) -> dict[str, Any]:
         results = state.get("execution_results", [])
         if results:
-            summary = summarize_execution(results, state.get("verification_results", []))
+            execution_summary = summarize_execution(results, state.get("verification_results", []))
+            if _successful_web_research(state.get("context", {})):
+                grounded_summary = await reasoner.summarize_read_only(
+                    state["user_request"],
+                    UserIntent.model_validate(state["intent"]),
+                    state.get("context", {}),
+                    state.get("errors", []),
+                )
+                summary = f"{grounded_summary}\n\n{execution_summary}"
+            else:
+                summary = execution_summary
         else:
             summary = await reasoner.summarize_read_only(
                 state["user_request"],
@@ -521,6 +552,7 @@ def build_daypilot_graph(dependencies: WorkflowDependencies, checkpointer: Any):
 
     graph = StateGraph(DayPilotState)
     graph.add_node("understand_request", understand_request)
+    graph.add_node("answer_general", answer_general)
     graph.add_node("discover_tools", discover_tools)
     graph.add_node("gather_context", gather_context)
     graph.add_node("build_plan", build_plan)
@@ -530,7 +562,12 @@ def build_daypilot_graph(dependencies: WorkflowDependencies, checkpointer: Any):
     graph.add_node("summarize", summarize)
     graph.add_node("summarize_cancelled", summarize_cancelled)
     graph.add_edge(START, "understand_request")
-    graph.add_edge("understand_request", "discover_tools")
+    graph.add_conditional_edges(
+        "understand_request",
+        _route_after_understand,
+        {"answer": "answer_general", "tools": "discover_tools"},
+    )
+    graph.add_edge("answer_general", END)
     graph.add_edge("discover_tools", "gather_context")
     graph.add_edge("gather_context", "build_plan")
     graph.add_conditional_edges(
@@ -556,6 +593,11 @@ def build_daypilot_graph(dependencies: WorkflowDependencies, checkpointer: Any):
 
 def _route_after_plan(state: DayPilotState) -> Literal["approval", "summarize"]:
     return "approval" if state.get("write_actions") else "summarize"
+
+
+def _route_after_understand(state: DayPilotState) -> Literal["answer", "tools"]:
+    intent = UserIntent.model_validate(state["intent"])
+    return "answer" if intent.request_kind == "general" else "tools"
 
 
 def _route_after_approval(state: DayPilotState) -> Literal["approved", "edited", "rejected"]:
@@ -911,6 +953,7 @@ def _intent_detail(intent: UserIntent) -> str:
 
 def _read_description(tool_name: str, arguments: dict[str, Any]) -> str:
     descriptions = {
+        "search_web": f"Research the web for “{arguments.get('query', '')}”",
         "search_mail": f"Search mail for “{arguments.get('query', '')}”",
         "get_thread": "Read matching mail thread",
         "get_message": "Read mail message",
@@ -930,6 +973,15 @@ def _read_description(tool_name: str, arguments: dict[str, Any]) -> str:
         "get_user_posts": f"Read public X posts from @{arguments.get('username', '')}",
     }
     return descriptions.get(tool_name, f"Run {tool_name}")
+
+
+def _successful_web_research(
+    context: dict[str, list[dict[str, Any]]],
+) -> bool:
+    return any(
+        record.get("tool_name") == "search_web" and record.get("success")
+        for record in context.get("web", [])
+    )
 
 
 def _read_follow_up(

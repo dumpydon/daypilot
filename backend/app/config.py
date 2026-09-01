@@ -24,6 +24,8 @@ class Settings(BaseSettings):
 
     openai_api_key: str | None = None
     openai_model: str = "gpt-5.4-mini"
+    tavily_api_key: str | None = None
+    tavily_base_url: str = "https://api.tavily.com"
     langsmith_tracing: bool = False
     langsmith_api_key: str | None = None
     langsmith_project: str = "daypilot-local"
@@ -119,6 +121,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "openai_api_key",
+        "tavily_api_key",
         "langsmith_api_key",
         "google_client_id",
         "google_client_secret",
@@ -202,6 +205,8 @@ class Settings(BaseSettings):
             "DAYPILOT_TASKS_PROVIDER": self.configured_provider("tasks"),
             "DAYPILOT_FILES_PROVIDER": self.configured_provider("files"),
             "DAYPILOT_X_PROVIDER": self.configured_provider("x"),
+            "TAVILY_API_KEY": self.tavily_api_key or "",
+            "TAVILY_BASE_URL": self.tavily_base_url,
             "COMPOSIO_API_KEY": self.composio_api_key or "",
             "COMPOSIO_GOOGLE_TOOLKIT": self.composio_google_toolkit,
             "COMPOSIO_X_TOOLKIT": self.composio_x_toolkit,

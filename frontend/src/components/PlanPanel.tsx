@@ -36,6 +36,10 @@ export function PlanPanel({ run, busy, onApprove, onReject, onEdit }: PlanPanelP
   const writes = run.plan.filter((action) => action.side_effecting);
   const waiting = run.status === "waiting_approval";
   const resolved = ["completed", "failed", "rejected"].includes(run.status);
+  const answerOnly = resolved
+    && run.plan.length === 0
+    && ["general", "research"].includes(run.intent?.request_kind ?? "");
+  const sources = researchSources(run);
   const hasFailedOutput = run.created_outputs.some(
     (output) => output.status === "failed"
       || output.status === "partially_completed"
@@ -85,10 +89,13 @@ export function PlanPanel({ run, busy, onApprove, onReject, onEdit }: PlanPanelP
         </div>
       )}
       {resolved && run.final_summary && <FinalSummary run={run} summaryTone={summaryTone} />}
+      {resolved && sources.length > 0 && <ResearchSources sources={sources} />}
       {resolved && <CreatedOutputs outputs={run.created_outputs} />}
 
       {run.plan.length === 0 ? resolved ? (
-        <p className={styles.emptyPlan}>No executable plan was produced for this run.</p>
+        answerOnly ? null : (
+          <p className={styles.emptyPlan}>No executable plan was produced for this run.</p>
+        )
       ) : <PlanSkeleton /> : resolved ? (
         <>
           {meaningfulDependencyGraph && (
@@ -239,6 +246,43 @@ function PlanViewToggle({
   );
 }
 
+function ResearchSources({
+  sources,
+}: {
+  sources: Array<{ title: string; url: string }>;
+}) {
+  return (
+    <div className={styles.researchSources} aria-label="Web research sources">
+      <span>Sources</span>
+      <div>
+        {sources.map((source) => (
+          <a key={source.url} href={source.url} target="_blank" rel="noreferrer">
+            {source.title}
+          </a>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function researchSources(run: RunDetail) {
+  const record = run.context.web?.findLast(
+    (item) => item.tool_name === "search_web" && item.success,
+  );
+  const raw = record?.result?.sources;
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((source) => {
+    if (!source || typeof source !== "object") return [];
+    const title = "title" in source ? source.title : null;
+    const url = "url" in source ? source.url : null;
+    return typeof title === "string"
+      && typeof url === "string"
+      && url.startsWith("http")
+      ? [{ title, url }]
+      : [];
+  }).slice(0, 4);
+}
+
 function FinalSummary({ run, summaryTone }: { run: RunDetail; summaryTone: string }) {
   const caution = summaryTone === styles.failedSummary || summaryTone === styles.warningSummary;
   const label = run.status === "rejected" ? "Closed safely" : caution ? "Needs attention" : "Done";
@@ -306,6 +350,7 @@ function resultHeading(status: RunDetail["status"], hasFailedOutput: boolean) {
 
 function serviceLabel(serverName: string) {
   const labels: Record<string, string> = {
+    web: "Web research",
     mail: "Mail",
     calendar: "Calendar",
     tasks: "Google Tasks",

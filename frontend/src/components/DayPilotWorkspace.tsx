@@ -54,7 +54,7 @@ const defaultPreferences: Preferences = {
 };
 
 const emptyCatalog: ToolCatalog = {
-  servers: ["mail", "calendar", "tasks", "files", "x"].map((name) => ({
+  servers: ["web", "mail", "calendar", "tasks", "files", "x"].map((name) => ({
     name,
     connected: false,
     tool_count: 0,
@@ -70,7 +70,7 @@ const emptyConnections: ConnectionCatalog = {
 };
 
 const streamEvents = [
-  "request_received", "request_understood", "tools_discovered",
+  "request_received", "request_understood", "general_answer_generated", "tools_discovered",
   "context_gathering_started", "tool_called", "tool_completed", "tool_failed", "tool_blocked",
   "context_gathered", "plan_generated", "approval_required", "approval_received",
   "plan_feedback_received", "replanning_started", "plan_revised",
@@ -459,7 +459,9 @@ export function DayPilotWorkspace() {
                   <PlanPanel key={`${activeRun.id}-${activeRun.plan_revision}-${activeRun.status}`} run={activeRun} busy={busy} onApprove={() => decide("approve")} onReject={() => decide("reject")} onEdit={revise} />
                   <TimelinePanel events={activeRun.events} runId={activeRun.id} runStatus={activeRun.status} />
                   <div className={styles.inspectorShelf}>
-                    <ContextPanel context={activeRun.context} />
+                    {activeRun.intent?.request_kind !== "general" && (
+                      <ContextPanel context={activeRun.context} />
+                    )}
                     <ToolInspector catalog={catalog} collapsible />
                   </div>
                 </div>

@@ -57,7 +57,7 @@ class MCPGateway:
                 "cwd": str(project_root),
                 "env": base_env,
             }
-            for name in ("mail", "calendar", "tasks", "files", "x")
+            for name in ("mail", "calendar", "tasks", "files", "x", "web")
         }
         self.client = MultiServerMCPClient(
             self.connections,  # type: ignore[arg-type]
@@ -131,14 +131,27 @@ class MCPGateway:
         return [
             {
                 **status,
-                **(
-                    self.connection_manager.status(server_name)
-                    if self.connection_manager is not None
-                    else {}
-                ),
+                **self._connection_status(server_name),
             }
             for server_name, status in self._server_status.items()
         ]
+
+    def _connection_status(self, server_name: str) -> dict[str, Any]:
+        if server_name == "web":
+            configured = bool(self.settings.tavily_api_key)
+            return {
+                "provider": "Tavily",
+                "provider_state": "connected" if configured else "unavailable",
+                "account_label": "Public web search" if configured else None,
+                "requires_reauth": False,
+                "last_error": None
+                if configured
+                else "Set TAVILY_API_KEY to enable fresh public web research.",
+                "connection_mode": "direct",
+            }
+        if self.connection_manager is None:
+            return {}
+        return self.connection_manager.status(server_name)
 
     def metadata(self, tool_name: str) -> ToolMetadata | None:
         return self._metadata.get(tool_name)

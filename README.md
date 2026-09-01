@@ -56,12 +56,14 @@ flowchart TB
         Tasks[Tasks]
         Files[Files]
         X[X]
+        Web[Web research]
     end
     MCP --> Mail
     MCP --> Calendar
     MCP --> Tasks
     MCP --> Files
     MCP --> X
+    MCP --> Web
 
     subgraph providers[Provider boundary]
         Demo[Seeded demo SQLite]
@@ -83,6 +85,7 @@ flowchart TB
     Tasks --> Direct
     X --> Direct
     Files --> Local
+    Web --> Tavily[Tavily Search API]
 
     subgraph persistence[Durable state]
         SQLite[(SQLite repository)]
@@ -99,8 +102,8 @@ DayPilot keeps orchestration separate from service capabilities:
 
 `LangGraph → MultiServerMCPClient → semantic DayPilot MCP server → provider adapter → provider`
 
-The graph never imports Gmail, Calendar, Tasks, Files, or X implementation
-functions. It discovers a stable semantic surface of **5 MCP domains and 20
+The graph never imports Gmail, Calendar, Tasks, Files, X, or web-provider
+functions. It discovers a stable semantic surface of **6 MCP domains and 21
 tools**.
 
 ## Why MCP
@@ -181,6 +184,7 @@ fails, dependent actions are blocked rather than fabricated.
 | Tasks | `list_tasks`, `create_task`, `create_task_batch`, `complete_task` | Demo SQLite, Composio-managed Google Tasks, or direct Google Tasks |
 | Files | `search_files`, `list_files`, `get_file_metadata`, `read_file` | Seeded demo data or allowlisted local folders; read-only |
 | X | `search_posts`, `get_post`, `get_user_posts`, `create_post_draft`, `publish_post` | Demo data, direct X, or managed Composio when available |
+| Web | `search_web` | Tavily Search API; read-only and optional |
 
 Connected Google mode uses one server-only Composio key and hosted MCP session
 for Gmail, Calendar, and Tasks. Managed X availability depends on the configured
@@ -215,7 +219,7 @@ provider writes are never part of automated evaluation.
 - **Frontend:** Next.js 16, React 19, TypeScript, Vitest
 - **Backend:** FastAPI, Python, Pydantic, Uvicorn
 - **Agent:** LangGraph, LangChain, OpenAI structured reasoning
-- **Integration:** MCP, `langchain-mcp-adapters`, Composio managed sessions
+- **Integration:** MCP, `langchain-mcp-adapters`, Composio managed sessions, Tavily web search
 - **Persistence:** SQLite, `aiosqlite`, LangGraph SQLite checkpoints
 - **Quality:** Pytest, Ruff, ESLint, TypeScript, deterministic evaluations
 
@@ -250,13 +254,16 @@ DAYPILOT_TIMEZONE=Asia/Kolkata
 DATABASE_URL=sqlite:///./data/daypilot.db
 OPENAI_API_KEY=
 COMPOSIO_API_KEY=
+TAVILY_API_KEY=
 NEXT_PUBLIC_API_URL=http://localhost:8000
 ```
 
 Set `DAYPILOT_DEMO_MODE=false` and provide `COMPOSIO_API_KEY` for managed
 Google connectivity, then connect accounts from Preferences. Optional
 `LANGSMITH_TRACING` / `LANGSMITH_API_KEY` enable tracing. Local Files requires
-an explicit allowlisted folder in Preferences. Never put provider secrets in
+an explicit allowlisted folder in Preferences. Set `TAVILY_API_KEY` to enable
+fresh public web research; without it DayPilot reports that search is unavailable
+instead of fabricating fresh information. Never put provider secrets in
 `NEXT_PUBLIC_*` variables.
 
 ## Project structure
@@ -276,7 +283,7 @@ frontend/
   src/lib/          API client, types, presentation helpers
 mcp_servers/
   common/           Shared demo schema, seed, and store
-  mail/ calendar/ tasks/ files/ x/
+  mail/ calendar/ tasks/ files/ x/ web/
 evaluation/         Deterministic scenario suite
 docs/               Architecture, demo, connected mode, and interview notes
 scripts/            Local development runner
@@ -320,6 +327,7 @@ cd frontend && npm test -- --run
 - Google Tasks stores due dates; exact due times are not preserved by the
   provider API.
 - X managed connectivity may be unavailable depending on Composio app support.
+- Fresh public web research requires a Tavily API key.
 - Some provider responses can be reported as created-unverified when they do not
   return enough stable information for deterministic read-back correlation.
 

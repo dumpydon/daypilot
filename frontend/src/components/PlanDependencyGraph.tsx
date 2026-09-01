@@ -3,6 +3,7 @@ import {
   CalendarDays,
   Check,
   FileText,
+  Globe2,
   ListChecks,
   LockKeyhole,
   Mail,
@@ -19,6 +20,7 @@ const COLUMN_GAP = 48;
 const ROW_GAP = 20;
 const CANVAS_PADDING = 24;
 const SERVICE_LABELS: Record<string, string> = {
+  web: "Web",
   mail: "Mail",
   calendar: "Calendar",
   tasks: "Tasks",
@@ -344,6 +346,7 @@ function validateGraph(actions: PlanAction[]) {
 
 function graphTitle(action: PlanAction) {
   const titles: Record<string, string> = {
+    search_web: "Research public sources",
     search_mail: "Find matching mail",
     get_thread: "Read grounded thread",
     get_message: "Read message",
@@ -369,6 +372,7 @@ function serviceLabel(serverName: string) {
 }
 
 function iconFor(serverName: string) {
+  if (serverName === "web") return <Globe2 size={15} />;
   if (serverName === "mail") return <Mail size={15} />;
   if (serverName === "calendar") return <CalendarDays size={15} />;
   if (serverName === "tasks") return <ListChecks size={15} />;

@@ -26,7 +26,7 @@ then executes once and is verified against provider state.
 
 The browser talks to a small FastAPI API. A `RunCoordinator` creates a run and
 starts a persisted LangGraph thread. The graph first understands the request,
-discovers the current tools from five isolated MCP server processes, and gathers
+discovers the current tools from six isolated MCP server processes, and gathers
 bounded read-only context. A planner converts normalized results into typed
 actions and `depends_on` edges. Those edges carry data flow: a Mail search
 grounds a thread ID, the thread grounds an interview datetime, Calendar grounds

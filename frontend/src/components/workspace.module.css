@@ -508,6 +508,11 @@
 .summary > span { width: 32px; height: 32px; border-radius: 8px; color: #6ed19a; background: #192920; }
 .summary p { color: #73c899; font-size: 11px; font-weight: 650; }
 .summary strong { margin-top: 5px; color: #e5ebe5; font-size: 14px; font-weight: 570; line-height: 1.5; }
+.researchSources { margin-top: 10px; display: flex; align-items: flex-start; gap: 10px; color: #758078; font-size: 10.5px; }
+.researchSources > span { flex: 0 0 auto; padding-top: 3px; color: #8e9891; font-weight: 620; }
+.researchSources > div { display: flex; flex-wrap: wrap; gap: 5px; }
+.researchSources a { padding: 3px 7px; border: 1px solid #303a43; border-radius: 999px; color: #90afe2; background: #151c25; text-decoration: none; }
+.researchSources a:hover { border-color: #4b6280; color: #b5caf0; }
 .warningSummary { border-color: #69552f; background: #201a11; }
 .warningSummary > span { color: #e1b05a; background: #302412; }
 .failedSummary { border: 0; background: #211719; box-shadow: inset 2px 0 #b45b62; }
@@ -666,8 +671,7 @@
 .capabilityCard:hover { border-color: #465369; background: #1b1e1d; transform: translateY(-1px); }
 .capabilityCard:focus-visible { outline: 2px solid #6ea0ff; outline-offset: 3px; }
 .capabilityCard { grid-column: span 2; }
-.capabilityCard:nth-child(4) { grid-column: 2 / span 2; }
-.capabilityCard:nth-child(5) { grid-column: 4 / span 2; }
+.capabilityCard:nth-child(4), .capabilityCard:nth-child(5) { grid-column: span 2; }
 .capabilityCardSelected { border-color: #5b7dbb; background: #1b2434; }
 .capabilityCardSelected:hover { border-color: #6e92d3; background: #202b3e; }
 .capabilityCardIcon { width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid #34445f; border-radius: 7px; color: #8eaff1; background: #1a2435; }

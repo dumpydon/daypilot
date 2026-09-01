@@ -20,6 +20,7 @@ class ToolPolicy:
 
 
 TOOL_POLICIES: dict[str, ToolPolicy] = {
+    "search_web": ToolPolicy("web", RiskLevel.SAFE_READ),
     "search_mail": ToolPolicy("mail", RiskLevel.SAFE_READ),
     "get_thread": ToolPolicy("mail", RiskLevel.SAFE_READ),
     "get_message": ToolPolicy("mail", RiskLevel.SAFE_READ),

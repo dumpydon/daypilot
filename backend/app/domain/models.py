@@ -52,6 +52,7 @@ class EventState(StrEnum):
 
 class UserIntent(BaseModel):
     goal: str
+    request_kind: Literal["general", "research", "personal", "hybrid"] = "personal"
     people: list[str] = Field(default_factory=list)
     date_constraints: list[str] = Field(default_factory=list)
     requested_outcomes: list[str] = Field(default_factory=list)
@@ -65,7 +66,7 @@ class UserIntent(BaseModel):
             "x_publish",
         ]
     ] = Field(default_factory=list)
-    information_needed: list[Literal["mail", "calendar", "tasks", "files", "x"]] = Field(
+    information_needed: list[Literal["web", "mail", "calendar", "tasks", "files", "x"]] = Field(
         default_factory=list
     )
 

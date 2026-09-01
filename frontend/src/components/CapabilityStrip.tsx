@@ -1,4 +1,4 @@
-import { AtSign, CalendarDays, Files, ListChecks, Mail, type LucideIcon } from "lucide-react";
+import { AtSign, CalendarDays, Files, Globe2, ListChecks, Mail, type LucideIcon } from "lucide-react";
 
 import type { ToolCatalog } from "@/lib/types";
 
@@ -11,13 +11,14 @@ interface CapabilityStripProps {
 }
 
 interface CapabilityDefinition {
-  serverName: "mail" | "calendar" | "tasks" | "files" | "x";
+  serverName: "web" | "mail" | "calendar" | "tasks" | "files" | "x";
   label: string;
   description: string;
   Icon: LucideIcon;
 }
 
 const capabilities: CapabilityDefinition[] = [
+  { serverName: "web", label: "Web", description: "Research fresh public information", Icon: Globe2 },
   { serverName: "mail", label: "Mail", description: "Find conversations and create drafts", Icon: Mail },
   { serverName: "calendar", label: "Calendar", description: "Check availability and schedule time", Icon: CalendarDays },
   { serverName: "tasks", label: "Tasks", description: "Review work and create tasks", Icon: ListChecks },
@@ -61,7 +62,7 @@ export function CapabilityStrip({ catalog, selectedServer, onSelect }: Capabilit
             key={serverName}
             className={`${styles.capabilityCard} ${selected ? styles.capabilityCardSelected : ""}`}
             aria-pressed={selected}
-            aria-label={`${label} capability, ${providerLabel}, ${status}, ${toolCount} tools`}
+            aria-label={`${label} capability, ${providerLabel}, ${status}, ${toolCount} ${toolCount === 1 ? "tool" : "tools"}`}
             data-testid={`capability-card-${serverName}`}
             onClick={() => onSelect(serverName)}
           >
@@ -73,7 +74,7 @@ export function CapabilityStrip({ catalog, selectedServer, onSelect }: Capabilit
             </span>
             <span className={`${styles.capabilityCardMeta} ${providerConnected ? styles.capabilityConnected : styles.capabilityDisconnected}`} title={status}>
               <i aria-hidden="true" />
-              {toolCount} tools
+              {toolCount} {toolCount === 1 ? "tool" : "tools"}
             </span>
           </button>
         );

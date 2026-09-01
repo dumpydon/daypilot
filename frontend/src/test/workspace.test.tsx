@@ -190,7 +190,7 @@ describe("DayPilot operations workspace", () => {
     expect(group).toHaveTextContent("OpenAI runtime");
     expect(group).toHaveTextContent("Local runtime");
     expect(screen.getByTestId("openai-runtime-indicator")).toHaveAttribute("data-runtime-state", "ready");
-    expect(screen.getByLabelText("5/5 MCP servers")).toBeInTheDocument();
+    expect(screen.getByLabelText("6/6 MCP servers")).toBeInTheDocument();
 
     view.rerender(<Header servers={capabilityCatalog.servers} reasoningMode="deterministic_demo" onMenu={vi.fn()} />);
     expect(screen.getByRole("group", { name: "Runtime status" })).toHaveTextContent("OpenAI unavailable");
@@ -285,6 +285,77 @@ describe("DayPilot operations workspace", () => {
     expect(screen.getByText("Write")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /approve & execute/i }));
     expect(approve).toHaveBeenCalledOnce();
+  });
+
+  it("renders a direct general answer without an awkward empty-plan message", () => {
+    render(
+      <PlanPanel
+        run={makeRun({
+          status: "completed",
+          approval_status: "not_required",
+          plan: [],
+          final_summary: "The capital of Lithuania is Vilnius.",
+          intent: {
+            goal: "What is the capital of Lithuania?",
+            request_kind: "general",
+            people: [],
+            date_constraints: [],
+            requested_outcomes: [],
+            requested_operations: [],
+            information_needed: [],
+          },
+        })}
+        busy={false}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onEdit={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("The capital of Lithuania is Vilnius.")).toBeInTheDocument();
+    expect(screen.queryByText("No executable plan was produced for this run.")).not.toBeInTheDocument();
+  });
+
+  it("shows compact retained sources for a web-researched answer", () => {
+    const webAction = {
+      ...makeRun().plan[0],
+      id: "web-read",
+      server_name: "web",
+      tool_name: "search_web",
+      description: "Research a current public update",
+    };
+    render(
+      <PlanPanel
+        run={makeRun({
+          status: "completed",
+          approval_status: "not_required",
+          plan: [webAction],
+          final_summary: "A current public update was confirmed.",
+          context: {
+            web: [{
+              tool_name: "search_web",
+              arguments: { query: "current update" },
+              description: "Research the web",
+              reason: "Fresh public information is required.",
+              result: {
+                sources: [{ title: "Primary source", url: "https://example.com/update" }],
+              },
+              success: true,
+              error: null,
+            }],
+            mail: [], calendar: [], tasks: [], files: [], x: [],
+          },
+        })}
+        busy={false}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onEdit={vi.fn()}
+      />,
+    );
+    expect(screen.getByLabelText("Web research sources")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Primary source" })).toHaveAttribute(
+      "href",
+      "https://example.com/update",
+    );
   });
 
   it("keeps demo reset and run-history clearing separate and guarded", () => {
@@ -973,6 +1044,7 @@ describe("DayPilot operations workspace", () => {
     expect(screen.getByText("Tasks")).toBeInTheDocument();
     expect(screen.getByText("Files")).toBeInTheDocument();
     expect(screen.getByText("X")).toBeInTheDocument();
+    expect(screen.getByTestId("capability-card-web")).toHaveTextContent("1 tool");
     expect(screen.getByTestId("capability-card-mail")).toHaveTextContent("4 tools");
     expect(screen.getByTestId("capability-card-calendar")).toHaveTextContent("3 tools");
     expect(screen.getByTestId("capability-card-tasks")).toHaveTextContent("4 tools");
@@ -983,7 +1055,7 @@ describe("DayPilot operations workspace", () => {
   it("opens and selects the matching MCP details from each capability card", async () => {
     const user = userEvent.setup();
     render(<CapabilityHarness />);
-    expect(screen.getByText("5 MCP servers · 20 tools")).toBeInTheDocument();
+    expect(screen.getByText("6 MCP servers · 21 tools")).toBeInTheDocument();
 
     await user.click(screen.getByTestId("capability-card-mail"));
     expect(screen.getByRole("button", { name: /collapse connected capabilities/i })).toHaveAttribute("aria-expanded", "true");

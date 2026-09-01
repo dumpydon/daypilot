@@ -82,6 +82,7 @@ export const toolCatalog: ToolCatalog = {
 
 export const capabilityCatalog: ToolCatalog = {
   servers: [
+    { name: "web", connected: true, tool_count: 1, tools: ["search_web"], error: null },
     { name: "mail", connected: true, tool_count: 4, tools: ["search_mail", "get_thread", "get_message", "create_draft"], error: null },
     { name: "calendar", connected: true, tool_count: 3, tools: ["list_events", "find_free_slots", "create_event"], error: null },
     { name: "tasks", connected: true, tool_count: 4, tools: ["list_tasks", "create_task", "create_task_batch", "complete_task"], error: null },
@@ -89,6 +90,7 @@ export const capabilityCatalog: ToolCatalog = {
     { name: "x", connected: true, tool_count: 5, tools: ["search_posts", "get_post", "get_user_posts", "create_post_draft", "publish_post"], error: null },
   ],
   tools: [
+    { name: "search_web", server_name: "web", description: "Research", risk_level: "SAFE_READ", side_effecting: false, input_schema: {} },
     { name: "search_mail", server_name: "mail", description: "Search", risk_level: "SAFE_READ", side_effecting: false, input_schema: {} },
     { name: "get_thread", server_name: "mail", description: "Thread", risk_level: "SAFE_READ", side_effecting: false, input_schema: {} },
     { name: "get_message", server_name: "mail", description: "Message", risk_level: "SAFE_READ", side_effecting: false, input_schema: {} },

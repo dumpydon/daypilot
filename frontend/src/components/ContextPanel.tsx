@@ -1,4 +1,4 @@
-import { AtSign, CalendarDays, CheckSquare2, ChevronDown, Files, Mail } from "lucide-react";
+import { AtSign, CalendarDays, CheckSquare2, ChevronDown, Files, Globe2, Mail } from "lucide-react";
 import { useState } from "react";
 
 import type { ContextRecord } from "@/lib/types";
@@ -21,12 +21,15 @@ export function ContextPanel({ context }: { context: Record<string, ContextRecor
   const files = context.files?.findLast((record) => record.tool_name === "read_file" && record.success)
     ?? context.files?.findLast((record) => record.tool_name === "search_files" && record.success);
   const posts = context.x?.findLast((record) => ["search_posts", "get_user_posts", "get_post"].includes(record.tool_name) && record.success);
+  const web = context.web?.findLast((record) => record.tool_name === "search_web" && record.success);
+  const webAttempted = context.web?.some((record) => record.tool_name === "search_web") ?? false;
   const mailMessages = mail?.result?.messages;
   const mailThreads = mail?.result?.threads;
   const calendarEvents = events?.result?.events;
   const taskItems = tasks?.result?.tasks;
   const fileItems = files?.result?.files;
   const postItems = posts?.result?.posts;
+  const webSources = web?.result?.sources;
 
   return (
     <section className={`${styles.contextPanel} ${expanded ? styles.contextExpanded : ""}`}>
@@ -38,6 +41,7 @@ export function ContextPanel({ context }: { context: Record<string, ContextRecor
         </button>
       </div>
       <div className={styles.contextSummary}>
+        <ContextStat icon={<Globe2 size={14} />} label="Web" value={Array.isArray(webSources) ? countLabel(webSources.length, "source") : webAttempted ? "Unavailable" : "Not queried"} />
         <ContextStat
           icon={<Mail size={14} />}
           label="Mail"
@@ -59,6 +63,7 @@ export function ContextPanel({ context }: { context: Record<string, ContextRecor
       {expanded && (
         <>
           <div className={styles.contextDetails}>
+            <ContextCard icon={<Globe2 size={13} />} label="Web" title={webTitle(web)} detail={webDetail(web)} />
             <ContextCard icon={<Mail size={13} />} label="Mail" title={mailTitle(mail)} detail={mailDetail(mail)} />
             <ContextCard icon={<CalendarDays size={13} />} label="Calendar" title={calendarTitle(events, slots)} detail={calendarDetail(events, slots)} />
             <ContextCard icon={<CheckSquare2 size={13} />} label="Tasks" title={taskTitle(tasks)} detail="Grounded task IDs remain available to the planner." />
@@ -94,6 +99,19 @@ function mailTitle(record?: ContextRecord) {
     return `${threads.length} matching mail thread${threads.length === 1 ? "" : "s"}`;
   }
   return "No matching thread read";
+}
+
+function webTitle(record?: ContextRecord) {
+  const sources = record?.result?.sources;
+  return Array.isArray(sources)
+    ? `${sources.length} public source${sources.length === 1 ? "" : "s"} reviewed`
+    : "Web not researched";
+}
+
+function webDetail(record?: ContextRecord) {
+  return typeof record?.result?.query === "string"
+    ? `Research query: ${record.result.query}`
+    : "Fresh public evidence will appear after a successful search.";
 }
 
 function mailDetail(record?: ContextRecord) {
