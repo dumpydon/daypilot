@@ -116,7 +116,12 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("LOCAL_FILE_MAX_DEPTH", "DAYPILOT_LOCAL_FILE_MAX_DEPTH"),
     )
     cors_origins: list[str] = Field(
-        default_factory=lambda: ["http://localhost:3000", "http://127.0.0.1:3000"]
+        default_factory=lambda: [
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+            "https://daypilot.dumpydon.workers.dev",
+        ],
+        validation_alias=AliasChoices("CORS_ORIGINS", "DAYPILOT_CORS_ORIGINS"),
     )
 
     @field_validator(

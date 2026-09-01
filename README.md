@@ -225,7 +225,8 @@ provider writes are never part of automated evaluation.
 
 ## Run locally
 
-Prerequisites: Python 3.13 (the `Makefile` uses `python3.13`) and Node.js 20+.
+Prerequisites: Python 3.13 (the `Makefile` uses `python3.13`) and Node.js 22+
+(required by the optional vinext/Cloudflare build tooling).
 
 ```bash
 make install

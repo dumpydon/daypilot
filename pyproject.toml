@@ -21,6 +21,14 @@ dependencies = [
   "uvicorn[standard]>=0.52,<1",
 ]
 
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["backend*", "mcp_servers*", "evaluation*"]
+exclude = ["frontend*", "data*"]
+
 [project.optional-dependencies]
 dev = [
   "pytest>=9.1,<10",

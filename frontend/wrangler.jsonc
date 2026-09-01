@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "daypilot",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "main": "vinext/server/fetch-handler",
+  "assets": {
+    "directory": "dist/client",
+    "not_found_handling": "none",
+    "binding": "ASSETS"
+  },
+  // Supply NEXT_PUBLIC_API_URL as a Cloudflare Workers Build variable so the
+  // client bundle targets the Render backend without baking in a repository URL.
+  "cache": {
+    "enabled": true
+  }
+}
