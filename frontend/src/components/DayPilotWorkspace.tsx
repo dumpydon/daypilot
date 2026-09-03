@@ -6,12 +6,16 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import {
   API_URL,
   addFileRoot,
+  adminLogin,
+  adminLogout,
   disconnectGoogle,
   disconnectX,
   createRun,
   decideRun,
   editRun,
   getConnections,
+  getAdminStatus,
+  getReadiness,
   listFileRoots,
   removeFileRoot,
   getHealth,
@@ -26,11 +30,13 @@ import {
   startXConnection,
 } from "@/lib/api";
 import type {
+  AdminStatus,
   ConnectionCatalog,
   FileRoot,
   Preferences,
   RunDetail,
   RunRecord,
+  ReadinessStatus,
   ToolCatalog,
 } from "@/lib/types";
 
@@ -60,12 +66,14 @@ const emptyCatalog: ToolCatalog = {
     tool_count: 0,
     tools: [],
     error: null,
+    provider: "Connecting services",
+    provider_state: "connecting",
   })),
   tools: [],
 };
 
 const emptyConnections: ConnectionCatalog = {
-  demo_mode: true,
+  demo_mode: false,
   connections: [],
 };
 
@@ -77,6 +85,7 @@ const streamEvents = [
   "execution_started", "action_started", "action_completed",
   "action_failed", "execution_verified", "run_rejected", "run_completed", "run_failed",
 ];
+const RUN_REFRESH_FALLBACK_MS = 3_000;
 
 export function DayPilotWorkspace() {
   const [catalog, setCatalog] = useState<ToolCatalog>(emptyCatalog);
@@ -108,6 +117,19 @@ export function DayPilotWorkspace() {
   const [selectedCapability, setSelectedCapability] = useState<string | null>(null);
   const capabilityInspectorRef = useRef<HTMLElement>(null);
   const [runtimeMode, setRuntimeMode] = useState("unknown");
+  const [readiness, setReadiness] = useState<ReadinessStatus>({
+    state: "starting",
+    mcp_servers_ready: 0,
+    mcp_servers_total: 6,
+    degraded_services: [],
+    message: "DayPilot is waking up and connecting services.",
+  });
+  const [adminStatus, setAdminStatus] = useState<AdminStatus>({
+    authenticated: false,
+    public_demo_mode: false,
+    expires_at: null,
+    message: "",
+  });
   const [maintenanceAction, setMaintenanceAction] = useState<"reset" | "clear" | null>(null);
   const [maintenanceBusy, setMaintenanceBusy] = useState(false);
   const [maintenanceMessage, setMaintenanceMessage] = useState<string | null>(null);
@@ -151,18 +173,54 @@ export function DayPilotWorkspace() {
   }, []);
 
   useEffect(() => {
-    Promise.all([getTools(), getPreferences(), listRuns(), getConnections(), listFileRoots()])
-      .then(([nextCatalog, nextPreferences, nextRuns, nextConnections, nextFileRoots]) => {
+    let cancelled = false;
+    async function loadWorkspace() {
+      let current: ReadinessStatus | null = null;
+      let attempt = 0;
+      while (!cancelled) {
+        try {
+          current = await getReadiness();
+          if (!cancelled) setReadiness(current);
+          if (current.state !== "starting") break;
+        } catch {
+          current = {
+            state: "starting",
+            mcp_servers_ready: 0,
+            mcp_servers_total: 6,
+            degraded_services: [],
+            message: "DayPilot is waking up and connecting services.",
+          };
+          if (!cancelled) setReadiness(current);
+        }
+        attempt += 1;
+        await delay(Math.min(500 + attempt * 50, 2_000));
+      }
+      if (cancelled || !current || current.state === "starting") return;
+      try {
+        const health = await getHealth();
+        if (!cancelled) setRuntimeMode(health.reasoning_mode);
+      } catch {
+        if (!cancelled) setRuntimeMode("unavailable");
+      }
+      try {
+        const [nextCatalog, nextPreferences, nextRuns, nextConnections, nextFileRoots] = await Promise.all([
+          getTools(), getPreferences(), listRuns(), getConnections(), listFileRoots(),
+        ]);
+        if (cancelled) return;
         setCatalog(nextCatalog);
         setPreferences(nextPreferences);
         setRuns(nextRuns);
         setConnections(nextConnections);
         setFileRoots(nextFileRoots);
-      })
-      .catch((cause: unknown) => setError(messageFrom(cause)));
-    getHealth()
-      .then((health) => setRuntimeMode(health.reasoning_mode))
-      .catch(() => setRuntimeMode("unavailable"));
+      } catch (cause) {
+        if (!cancelled) setError(messageFrom(cause));
+      }
+    }
+    void loadWorkspace();
+    void getAdminStatus()
+      .then((status) => { if (!cancelled) setAdminStatus(status); })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
@@ -185,7 +243,7 @@ export function DayPilotWorkspace() {
   useEffect(() => {
     if (!activeRun?.id) return;
     const runId = activeRun.id;
-    const source = new EventSource(`${API_URL}/api/runs/${runId}/events`);
+    const source = new EventSource(`${API_URL}/api/runs/${runId}/events`, { withCredentials: true });
     let refreshTimer: ReturnType<typeof setTimeout> | null = null;
     const scheduleRefresh = () => {
       if (refreshTimer) clearTimeout(refreshTimer);
@@ -208,7 +266,7 @@ export function DayPilotWorkspace() {
     if (!activeRun || ["completed", "rejected", "failed", "waiting_approval"].includes(activeRun.status)) return;
     const timer = setInterval(() => {
       refreshActive(activeRun.id).catch((cause: unknown) => setError(messageFrom(cause)));
-    }, 900);
+    }, RUN_REFRESH_FALLBACK_MS);
     return () => clearInterval(timer);
   }, [activeRun, refreshActive]);
 
@@ -220,6 +278,10 @@ export function DayPilotWorkspace() {
   const presentedStatus = activeRun ? presentationStatus(activeRun) : null;
 
   async function start(goal: string) {
+    if (readiness.state === "starting") {
+      setError("DayPilot is still waking up and connecting services. Try again shortly.");
+      return;
+    }
     setBusy(true);
     setError(null);
     setActiveRun(null);
@@ -287,6 +349,35 @@ export function DayPilotWorkspace() {
     setConnections(nextConnections);
     setFileRoots(nextFileRoots);
     setCatalog(nextCatalog);
+  }
+
+  async function unlockAdmin(accessCode: string) {
+    const status = await adminLogin(accessCode);
+    setAdminStatus(status);
+    const [nextCatalog, nextConnections, nextPreferences, nextRuns, nextFileRoots] = await Promise.all([
+      getTools(), getConnections(), getPreferences(), listRuns(), listFileRoots(),
+    ]);
+    setCatalog(nextCatalog);
+    setConnections(nextConnections);
+    setPreferences(nextPreferences);
+    setRuns(nextRuns);
+    setFileRoots(nextFileRoots);
+    setNotice("Admin mode enabled.");
+  }
+
+  async function lockAdmin() {
+    const status = await adminLogout();
+    setAdminStatus(status);
+    const [nextCatalog, nextConnections, nextPreferences, nextRuns, nextFileRoots] = await Promise.all([
+      getTools(), getConnections(), getPreferences(), listRuns(), listFileRoots(),
+    ]);
+    setCatalog(nextCatalog);
+    setConnections(nextConnections);
+    setPreferences(nextPreferences);
+    setRuns(nextRuns);
+    setFileRoots(nextFileRoots);
+    setActiveRun(null);
+    setNotice("Admin mode locked.");
   }
 
   async function connectGoogle() {
@@ -386,6 +477,9 @@ export function DayPilotWorkspace() {
         <Header
           servers={catalog.servers}
           reasoningMode={reasoningMode}
+          readinessState={readiness.state}
+          publicDemoMode={adminStatus.public_demo_mode}
+          adminAuthenticated={adminStatus.authenticated}
           active={busy || Boolean(activeRun && ["queued", "running", "resuming"].includes(activeRun.status))}
           onMenu={() => setMobileSidebarOpen(true)}
         />
@@ -408,29 +502,43 @@ export function DayPilotWorkspace() {
           />
           <section className={`${styles.workspace} ${activeRun ? styles.workspaceActive : ""}`}>
             {error && <div className={styles.errorBanner}><AlertTriangle size={14} /><span>{error}</span><button onClick={() => setError(null)}>Dismiss</button></div>}
+            {readiness.state !== "ready" && (
+              <div className={styles.readinessBanner} role="status">
+                <i className={readiness.state === "starting" ? styles.readinessPulse : styles.readinessWarn} />
+                <span>{readiness.message}</span>
+              </div>
+            )}
             {!activeRun ? (
               <div className={styles.startView}>
-                <RequestComposer onSubmit={start} busy={busy} />
-                <div className={styles.landingGrid}>
-                  <section className={styles.capabilityPanel} aria-labelledby="capability-heading">
-                    <div className={styles.sectionHeader}>
-                      <div>
-                        <span className={styles.eyebrow}>Connected services</span>
-                        <h2 id="capability-heading">What DayPilot can do</h2>
-                      </div>
-                    </div>
-                    <CapabilityStrip catalog={catalog} selectedServer={selectedCapability} onSelect={selectCapability} />
+                <RequestComposer onSubmit={start} busy={busy} disabled={readiness.state === "starting"} />
+                {readiness.state === "starting" ? (
+                  <section className={styles.capabilityLoading} aria-label="Capabilities connecting">
+                    <span className={styles.eyebrow}>Connected services</span>
+                    <h2>Connecting capability catalog…</h2>
+                    <p>Service details will appear when DayPilot finishes waking up.</p>
                   </section>
-                  <ToolInspector
-                    catalog={catalog}
-                    collapsible
-                    open={capabilityInspectorOpen}
-                    onOpenChange={handleCapabilityInspectorOpenChange}
-                    expandedServer={selectedCapability}
-                    onExpandedServerChange={handleCapabilityInspectorServerChange}
-                    sectionRef={capabilityInspectorRef}
-                  />
-                </div>
+                ) : (
+                  <div className={styles.landingGrid}>
+                    <section className={styles.capabilityPanel} aria-labelledby="capability-heading">
+                      <div className={styles.sectionHeader}>
+                        <div>
+                          <span className={styles.eyebrow}>Connected services</span>
+                          <h2 id="capability-heading">What DayPilot can do</h2>
+                        </div>
+                      </div>
+                      <CapabilityStrip catalog={catalog} selectedServer={selectedCapability} onSelect={selectCapability} />
+                    </section>
+                    <ToolInspector
+                      catalog={catalog}
+                      collapsible
+                      open={capabilityInspectorOpen}
+                      onOpenChange={handleCapabilityInspectorOpenChange}
+                      expandedServer={selectedCapability}
+                      onExpandedServerChange={handleCapabilityInspectorServerChange}
+                      sectionRef={capabilityInspectorRef}
+                    />
+                  </div>
+                )}
               </div>
             ) : (
               <>
@@ -479,6 +587,9 @@ export function DayPilotWorkspace() {
             maintenanceBlocked={hasProcessingRun}
             maintenanceMessage={maintenanceBlockMessage}
             maintenanceBusy={maintenanceBusy}
+            adminStatus={adminStatus}
+            onAdminLogin={unlockAdmin}
+            onAdminLogout={lockAdmin}
             connections={connections}
             fileRoots={fileRoots}
             onConnectGoogle={connectGoogle}

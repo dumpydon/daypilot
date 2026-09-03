@@ -132,6 +132,24 @@ export interface HealthStatus {
   graph: "ready";
   demo_mode: boolean;
   reasoning_mode: string;
+  runtime_state: RuntimeState;
+}
+
+export type RuntimeState = "starting" | "ready" | "degraded";
+
+export interface ReadinessStatus {
+  state: RuntimeState;
+  mcp_servers_ready: number;
+  mcp_servers_total: number;
+  degraded_services: string[];
+  message: string;
+}
+
+export interface AdminStatus {
+  authenticated: boolean;
+  public_demo_mode: boolean;
+  expires_at: string | null;
+  message: string;
 }
 
 export interface DemoResetResponse {

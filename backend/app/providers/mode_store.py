@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import sqlite3
-from pathlib import Path
+from backend.app.persistence.database import DatabaseTarget, connect_sync
 
 
 class ProviderModeStore:
@@ -9,26 +8,26 @@ class ProviderModeStore:
 
     SERVICES = ("mail", "calendar", "tasks", "files", "x")
 
-    def __init__(self, database_path: Path, defaults: dict[str, str]) -> None:
-        self.database_path = database_path
+    def __init__(self, database_target: DatabaseTarget, defaults: dict[str, str]) -> None:
+        self.database_target = database_target
         self.defaults = defaults
 
     def get(self, service: str) -> str:
         if service not in self.SERVICES:
             raise ValueError(f"Unknown provider service {service!r}")
         try:
-            with sqlite3.connect(self.database_path) as connection:
+            with connect_sync(self.database_target) as connection:
                 row = connection.execute(
                     "SELECT mode FROM provider_modes WHERE service = ?", (service,)
                 ).fetchone()
-        except sqlite3.Error:
+        except Exception:
             row = None
-        return str(row[0]) if row else self.defaults[service]
+        return str(row["mode"]) if row else self.defaults[service]
 
     def set(self, service: str, mode: str) -> None:
         if service not in self.SERVICES:
             raise ValueError(f"Unknown provider service {service!r}")
-        with sqlite3.connect(self.database_path) as connection:
+        with connect_sync(self.database_target) as connection:
             connection.execute(
                 """
                 INSERT INTO provider_modes(service, mode, updated_at)

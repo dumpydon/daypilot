@@ -90,6 +90,17 @@ async def test_read_only_research_does_not_invoke_write_planning_model() -> None
     assert actions == []
 
 
+@pytest.mark.asyncio
+async def test_configured_openai_failure_does_not_claim_the_key_is_missing() -> None:
+    reasoner = OpenAIReasoner(Settings(_env_file=None, openai_api_key="configured"), model=object())
+    intent = UserIntent(goal="Answer an uncommon general question", request_kind="general")
+
+    answer = await reasoner.answer_general("Explain an uncommon topic", intent)
+
+    assert "configured but unavailable" in answer
+    assert "Configure OPENAI_API_KEY" not in answer
+
+
 def test_unavailable_web_research_is_reported_without_unrelated_service_claims() -> None:
     error = "Fresh web research is unavailable because TAVILY_API_KEY is not configured."
     context = {

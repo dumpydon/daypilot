@@ -217,12 +217,38 @@ class RunAccepted(BaseModel):
     status: RunStatus
 
 
+class RuntimeState(StrEnum):
+    STARTING = "starting"
+    READY = "ready"
+    DEGRADED = "degraded"
+
+
 class HealthResponse(BaseModel):
     status: Literal["ok"] = "ok"
     database: Literal["connected"] = "connected"
     graph: Literal["ready"] = "ready"
     demo_mode: bool
     reasoning_mode: str
+    runtime_state: RuntimeState = RuntimeState.STARTING
+
+
+class ReadinessResponse(BaseModel):
+    state: RuntimeState
+    mcp_servers_ready: int
+    mcp_servers_total: int
+    degraded_services: list[str] = Field(default_factory=list)
+    message: str
+
+
+class AdminLoginRequest(BaseModel):
+    access_code: str = Field(min_length=1, max_length=256)
+
+
+class AdminStatusResponse(BaseModel):
+    authenticated: bool
+    public_demo_mode: bool
+    expires_at: datetime | None = None
+    message: str
 
 
 class ProviderConnectionState(StrEnum):

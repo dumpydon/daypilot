@@ -62,6 +62,11 @@
 .errorBanner { min-height: 39px; display: flex; align-items: center; gap: 9px; padding: 0 20px; background: #251416; border-bottom: 1px solid #5d2d32; color: #e29a9f; font-size: 11px; }
 .errorBanner span { flex: 1; }
 .errorBanner button { border: 0; background: transparent; color: #c07f84; cursor: pointer; font-size: 10px; }
+.readinessBanner { min-height: 36px; display: flex; align-items: center; gap: 9px; padding: 0 20px; background: #171c26; border-bottom: 1px solid #2e3e58; color: #a8bce3; font-size: 11px; }
+.readinessBanner i { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; }
+.readinessPulse { background: #75a2fa; box-shadow: 0 0 0 4px #416bad2a; animation: pulse 1.6s ease-in-out infinite; }
+.readinessWarn { background: #d3a24d; box-shadow: 0 0 8px #d3a24d44; }
+@keyframes pulse { 50% { opacity: .45; } }
 .requestBar { min-height: 98px; padding: 22px 27px; border-bottom: 1px solid #20242b; display: flex; align-items: flex-end; justify-content: space-between; background: #101216; }
 .requestBar h1 { margin-top: 9px; font-size: clamp(17px, 1.55vw, 22px); letter-spacing: -.55px; font-weight: 590; }
 .runId { color: #626a76; font: 10px var(--font-geist-mono); }
@@ -249,6 +254,11 @@
 .settingsSectionHeader > svg { flex: 0 0 auto; margin-top: 1px; color: #8ea9df; }
 .settingsSectionHeader strong { display: block; color: #d8ddd7; font-size: 11px; font-weight: 620; }
 .settingsSectionHeader p { margin-top: 4px; color: #858e87; font-size: 10px; line-height: 1.4; }
+.adminAccessRow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; }
+.adminAccessRow input { min-width: 0; height: 30px; padding: 0 9px; border: 1px solid #303832; border-radius: 6px; background: #101311; color: #d8ddd7; font: 11px var(--font-geist-sans); }
+.secondaryButton { min-height: 30px; padding: 0 11px; border: 1px solid #3b526f; border-radius: 6px; background: #172337; color: #aac5f8; font-size: 10px; cursor: pointer; }
+.secondaryButton:hover:not(:disabled) { border-color: #5c80ad; background: #1c2e49; }
+.secondaryButton:disabled { cursor: not-allowed; opacity: .55; }
 .dangerButton { min-height: 30px; justify-self: start; padding: 0 10px; border: 1px solid #5d4430; border-radius: 6px; background: #241b15; color: #d4a071; font-size: 10px; font-weight: 620; cursor: pointer; }
 .dangerButton:hover:not(:disabled) { border-color: #886044; background: #302219; color: #e6b787; }
 .dangerButton:disabled { cursor: not-allowed; opacity: .5; }
@@ -649,6 +659,9 @@
 @keyframes runningTrail { 0% { opacity: 0; transform: translateY(0); } 18% { opacity: .72; } 78% { opacity: .24; } 100% { opacity: 0; transform: translateY(42px); } }
 
 .landingGrid { width: min(100%, 1120px); max-width: 1120px; margin: clamp(120px, 19vw, 246px) auto 0; grid-template-columns: 1fr; border: 0; border-radius: 0; overflow: visible; }
+.capabilityLoading { width: min(100%, 1120px); margin: clamp(120px, 19vw, 246px) auto 0; padding: 24px 0; border-top: 1px solid #292d2a; color: #858b87; }
+.capabilityLoading h2 { margin: 7px 0 6px; color: #d8dad8; font-size: 15px; font-weight: 650; }
+.capabilityLoading p { margin: 0; font-size: 12px; line-height: 1.55; }
 .capabilityPanel { padding: 20px 0 17px; background: transparent; }
 .capabilityPanel h2 { margin-top: 6px; font-size: 15px; }
 .capabilityCards { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; margin-top: 16px; }

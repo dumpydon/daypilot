@@ -31,7 +31,7 @@ class LocalFilesService:
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.database_path = settings.database_path
+        self.database_target = settings.database_target
 
     def list_files(self, query: str | None = None, limit: int = 25) -> dict[str, Any]:
         files = list(self._iter_files())
@@ -81,16 +81,17 @@ class LocalFilesService:
 
     def _roots(self) -> list[Path]:
         try:
-            import sqlite3
+            from backend.app.persistence.database import connect_sync
 
-            with sqlite3.connect(self.database_path) as connection:
+            with connect_sync(self.database_target) as connection:
                 rows = connection.execute(
                     "SELECT path FROM file_roots ORDER BY added_at"
                 ).fetchall()
         except Exception as exc:
             raise ProviderUnavailableError("Local Files configuration is unavailable.") from exc
         roots: list[Path] = []
-        for (raw_path,) in rows:
+        for row in rows:
+            raw_path = row["path"]
             try:
                 root = Path(raw_path).resolve(strict=True)
             except OSError:

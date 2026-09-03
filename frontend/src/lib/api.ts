@@ -1,11 +1,13 @@
 import type {
   DemoResetResponse,
+  AdminStatus,
   ConnectionCatalog,
   FileRoot,
   HealthStatus,
   Preferences,
   RunDetail,
   RunHistoryClearResponse,
+  ReadinessStatus,
   RunRecord,
   ToolCatalog,
 } from "./types";
@@ -15,6 +17,7 @@ export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, {
     ...init,
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
       ...init?.headers,
@@ -68,6 +71,25 @@ export async function getTools(): Promise<ToolCatalog> {
 
 export async function getHealth(): Promise<HealthStatus> {
   return request("/health");
+}
+
+export async function getReadiness(): Promise<ReadinessStatus> {
+  return request("/api/readiness");
+}
+
+export async function getAdminStatus(): Promise<AdminStatus> {
+  return request("/api/admin/status");
+}
+
+export async function adminLogin(accessCode: string): Promise<AdminStatus> {
+  return request("/api/admin/login", {
+    method: "POST",
+    body: JSON.stringify({ access_code: accessCode }),
+  });
+}
+
+export async function adminLogout(): Promise<AdminStatus> {
+  return request("/api/admin/logout", { method: "POST" });
 }
 
 export async function getConnections(): Promise<ConnectionCatalog> {

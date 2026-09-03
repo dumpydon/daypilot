@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import os
-import sqlite3
 from datetime import datetime, time, timedelta
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
+
+from backend.app.persistence.database import (
+    DatabaseTarget,
+    connect_sync,
+    is_postgres_target,
+    sqlite_path,
+)
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -81,37 +88,29 @@ CREATE TABLE IF NOT EXISTS x_posts (
 """
 
 
-def database_path_from_env() -> Path:
+def database_path_from_env() -> DatabaseTarget:
+    database_url = os.getenv("DATABASE_URL", "sqlite:///./data/daypilot.db")
+    # DATABASE_URL is the production boundary. A stale local override must
+    # never divert MCP children back to an ephemeral SQLite file.
+    if is_postgres_target(database_url):
+        return database_url
     explicit = os.getenv("DAYPILOT_DATABASE_PATH")
     if explicit:
         return Path(explicit).expanduser().resolve()
-    database_url = os.getenv("DATABASE_URL", "sqlite:///./data/daypilot.db")
-    if not database_url.startswith("sqlite:///"):
-        raise RuntimeError("Demo MCP servers require a sqlite:/// DATABASE_URL")
-    raw_path = database_url.removeprefix("sqlite:///")
-    path = Path(raw_path)
-    if not path.is_absolute():
-        project_root = Path(__file__).resolve().parents[2]
-        path = project_root / path
-    return path.resolve()
+    return sqlite_path(database_url)
 
 
-def connect(database_path: Path) -> sqlite3.Connection:
-    database_path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(database_path, timeout=10)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA journal_mode=WAL")
-    connection.execute("PRAGMA foreign_keys=ON")
-    return connection
+def connect(database_target: DatabaseTarget):
+    return connect_sync(database_target)
 
 
 def initialize_demo_database(
-    database_path: Path,
+    database_target: DatabaseTarget,
     timezone_name: str = "Asia/Kolkata",
     *,
     force_reset: bool = False,
 ) -> None:
-    with connect(database_path) as connection:
+    with connect(database_target) as connection:
         connection.executescript(SCHEMA)
         seeded = connection.execute(
             "SELECT value FROM demo_metadata WHERE key = 'seed_version'"
@@ -134,14 +133,14 @@ def initialize_demo_database(
         connection.commit()
 
 
-def ensure_demo_database_schema(database_path: Path) -> None:
+def ensure_demo_database_schema(database_target: DatabaseTarget) -> None:
     """Create local service tables without inserting fictional demo records."""
-    with connect(database_path) as connection:
+    with connect(database_target) as connection:
         connection.executescript(SCHEMA)
         connection.commit()
 
 
-def _seed(connection: sqlite3.Connection, timezone_name: str) -> None:
+def _seed(connection: Any, timezone_name: str) -> None:
     timezone = ZoneInfo(timezone_name)
     now = datetime.now(timezone).replace(second=0, microsecond=0)
     today = now.date()
@@ -328,7 +327,7 @@ def _seed(connection: sqlite3.Connection, timezone_name: str) -> None:
     _seed_extensions(connection, timezone_name)
 
 
-def _seed_extensions(connection: sqlite3.Connection, timezone_name: str) -> None:
+def _seed_extensions(connection: Any, timezone_name: str) -> None:
     """Add the small Files/X demo corpus without resetting existing demo state."""
     timezone = ZoneInfo(timezone_name)
     now = datetime.now(timezone).replace(second=0, microsecond=0)
@@ -472,5 +471,6 @@ def _seed_extensions(connection: sqlite3.Connection, timezone_name: str) -> None
         [(*post, post[4]) for post in posts],
     )
     connection.execute(
-        "INSERT OR REPLACE INTO demo_metadata(key, value) VALUES ('seed_version', '2')"
+        "INSERT INTO demo_metadata(key, value) VALUES ('seed_version', '2') "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
     )

@@ -16,7 +16,7 @@ flowchart LR
     Servers --> Adapters[Demo / managed / direct adapters]
     Adapters --> Providers[Google, X, or local filesystem]
     Graph <--> Repo[DayPilotRepository]
-    Graph <--> Checkpoint[(SQLite checkpoints)]
+    Graph <--> Checkpoint[(SQLite locally / PostgreSQL in production)]
     Coordinator --> Repo
 ```
 
@@ -29,7 +29,7 @@ The application has four intentionally separate concerns:
 - **Provider selection:** each semantic server resolves its adapter from the
   current demo/managed/direct configuration.
 - **Durability:** the repository stores application records while the LangGraph
-  SQLite checkpointer stores resumable graph state.
+  SQLite or PostgreSQL checkpointer stores resumable graph state.
 
 The graph does not import provider adapters or call provider SDKs. The only
 planner-facing names are the semantic MCP tools listed in the README.
@@ -62,7 +62,7 @@ boundary), available tool metadata, per-service context, plan/read/write action
 lists, approval status and hash, revision number, execution and verification
 results, errors, preferences, and timestamps.
 
-The SQLite application repository stores:
+The application repository stores (SQLite locally or PostgreSQL in production):
 
 - run records and statuses;
 - timeline events;
@@ -71,8 +71,13 @@ The SQLite application repository stores:
 - local Files roots and managed connection metadata.
 
 The LangGraph checkpointer stores thread snapshots, pending interrupts, and
-resume state. This is why approval survives a browser refresh and why a historical
-run can be reopened without calling the model or providers again.
+resume state using the dialect-matched saver. This is why approval survives a
+browser refresh and a Render restart without calling the model or providers again.
+
+When `DAYPILOT_PUBLIC_DEMO_MODE=true`, anonymous requests are restricted to
+general/web work. Admin sessions are short-lived, HttpOnly, hashed in the same
+repository, and carried into the graph as an authorization flag. The MCP gateway
+enforces that flag independently of the REST/UI controls.
 
 ## MCP capability boundary
 

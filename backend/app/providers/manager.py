@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -16,6 +15,7 @@ from backend.app.domain.models import (
     ProviderConnection,
     ProviderConnectionState,
 )
+from backend.app.persistence.database import DatabaseTarget, connect_sync
 from backend.app.persistence.repository import DayPilotRepository
 from backend.app.providers.composio import MANAGED_AUTH_UNAVAILABLE, ComposioManagedClient
 from backend.app.providers.credentials import EncryptedCredentialStore
@@ -64,7 +64,7 @@ class ConnectionManager:
         self.settings = settings
         self.repository = repository
         self.mode_store = ProviderModeStore(
-            settings.database_path,
+            settings.database_target,
             {
                 service: settings.configured_provider(service)
                 for service in ProviderModeStore.SERVICES
@@ -88,6 +88,29 @@ class ConnectionManager:
         return ConnectionCatalog(
             demo_mode=self.settings.daypilot_demo_mode,
             connections=[self.connection(service) for service in ProviderModeStore.SERVICES],
+        )
+
+    def public_catalog(self) -> ConnectionCatalog:
+        if not self.settings.public_demo_mode or self.settings.daypilot_demo_mode:
+            return self.catalog()
+        return ConnectionCatalog(
+            demo_mode=False,
+            connections=[
+                ProviderConnection(
+                    service=service,
+                    provider=(
+                        "Google Workspace"
+                        if service in {"mail", "calendar", "tasks"}
+                        else service.title()
+                    ),
+                    state=ProviderConnectionState.UNAVAILABLE,
+                    capabilities=[],
+                    last_error="Available to admin only.",
+                    metadata={},
+                    connection_mode="managed" if service != "files" else "local",
+                )
+                for service in ProviderModeStore.SERVICES
+            ],
         )
 
     def status(self, service: str) -> dict[str, Any]:
@@ -537,7 +560,7 @@ class ConnectionManager:
         )
 
     def _files_connection(self, capabilities: list[str]) -> ProviderConnection:
-        roots = _read_roots(self.settings.database_path)
+        roots = _read_roots(self.settings.database_target)
         existing = [root for root in roots if Path(root["path"]).is_dir()]
         if existing and len(existing) == len(roots):
             state = ProviderConnectionState.CONNECTED
@@ -578,14 +601,13 @@ def _validate_root(raw_path: str) -> Path:
     return resolved
 
 
-def _read_roots(database_path: Path) -> list[dict[str, str]]:
+def _read_roots(database_target: DatabaseTarget) -> list[dict[str, str]]:
     try:
-        with sqlite3.connect(database_path) as connection:
-            connection.row_factory = sqlite3.Row
+        with connect_sync(database_target) as connection:
             return [
                 dict(row) for row in connection.execute("SELECT id, path, label FROM file_roots")
             ]
-    except sqlite3.Error:
+    except Exception:
         return []
 
 

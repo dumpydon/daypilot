@@ -31,7 +31,7 @@ class DemoWorkspaceService:
             try:
                 await asyncio.to_thread(
                     initialize_demo_database,
-                    self.settings.database_path,
+                    self.settings.database_target,
                     self.settings.daypilot_timezone,
                     force_reset=True,
                 )

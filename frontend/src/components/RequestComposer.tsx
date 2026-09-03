@@ -15,9 +15,10 @@ const examples = [
 interface RequestComposerProps {
   onSubmit: (goal: string) => Promise<void> | void;
   busy: boolean;
+  disabled?: boolean;
 }
 
-export function RequestComposer({ onSubmit, busy }: RequestComposerProps) {
+export function RequestComposer({ onSubmit, busy, disabled = false }: RequestComposerProps) {
   const [goal, setGoal] = useState("");
   const [pickerOpen, setPickerOpen] = useState(false);
   const [highlightedIndex, setHighlightedIndex] = useState(0);
@@ -68,7 +69,7 @@ export function RequestComposer({ onSubmit, busy }: RequestComposerProps) {
 
   async function submitGoal() {
     const nextGoal = goal.trim();
-    if (!nextGoal || busy || submissionInFlightRef.current) return;
+    if (!nextGoal || busy || disabled || submissionInFlightRef.current) return;
     submissionInFlightRef.current = true;
     try {
       await onSubmit(nextGoal);
@@ -120,9 +121,9 @@ export function RequestComposer({ onSubmit, busy }: RequestComposerProps) {
             onKeyDown={handleGoalKeyDown}
             placeholder="Prepare me for my interview with Simon tomorrow."
             rows={2}
-            disabled={busy}
+            disabled={busy || disabled}
           />
-          <button type="submit" disabled={busy || !goal.trim()} aria-label="Start DayPilot run" title="Start DayPilot run">
+          <button type="submit" disabled={busy || disabled || !goal.trim()} aria-label="Start DayPilot run" title="Start DayPilot run">
             <ArrowRight size={19} strokeWidth={2.3} />
           </button>
         </form>
@@ -132,6 +133,7 @@ export function RequestComposer({ onSubmit, busy }: RequestComposerProps) {
             className={styles.demoTrigger}
             aria-expanded={pickerOpen}
             aria-haspopup="menu"
+            disabled={busy || disabled}
             onClick={() => { setPickerOpen((value) => !value); setHighlightedIndex(0); }}
           >
             <Sparkles size={13} /> Try a demo <ChevronDown size={13} className={pickerOpen ? styles.chevronOpen : ""} />

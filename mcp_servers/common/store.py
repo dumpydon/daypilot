@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import re
-import sqlite3
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from backend.app.persistence.database import DatabaseTarget
 from mcp_servers.common.database import connect, initialize_demo_database
 
 STOP_WORDS = {
@@ -53,16 +52,20 @@ SEARCH_NOISE = STOP_WORDS | {
 }
 
 
-def _row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+def _row(row: Any | None) -> dict[str, Any] | None:
     return dict(row) if row is not None else None
 
 
 class DemoServiceStore:
-    """SQLite-backed service state shared by short-lived stdio MCP processes."""
+    """Service state shared by short-lived stdio MCP processes."""
 
-    def __init__(self, database_path: Path, timezone_name: str = "Asia/Kolkata") -> None:
-        self.database_path = database_path
-        initialize_demo_database(database_path, timezone_name)
+    def __init__(
+        self,
+        database_target: DatabaseTarget,
+        timezone_name: str = "Asia/Kolkata",
+    ) -> None:
+        self.database_target = database_target
+        initialize_demo_database(database_target, timezone_name)
 
     def search_mail(self, query: str, limit: int = 10) -> dict[str, Any]:
         limit = max(1, min(limit, 25))
@@ -71,7 +74,7 @@ class DemoServiceStore:
             for token in re.findall(r"[a-z0-9@.]+", query.lower())
             if len(token) > 1 and token not in STOP_WORDS
         ]
-        with connect(self.database_path) as connection:
+        with connect(self.database_target) as connection:
             rows = connection.execute(
                 """
                 SELECT
@@ -106,7 +109,7 @@ class DemoServiceStore:
         }
 
     def get_thread(self, thread_id: str) -> dict[str, Any]:
-        with connect(self.database_path) as connection:
+        with connect(self.database_target) as connection:
             thread = connection.execute(
                 "SELECT * FROM mail_threads WHERE id = ?", (thread_id,)
             ).fetchone()
@@ -119,7 +122,7 @@ class DemoServiceStore:
         return {**dict(thread), "messages": [dict(message) for message in messages]}
 
     def get_message(self, message_id: str) -> dict[str, Any]:
-        with connect(self.database_path) as connection:
+        with connect(self.database_target) as connection:
             message = connection.execute(
                 "SELECT * FROM mail_messages WHERE id = ?", (message_id,)
             ).fetchone()
@@ -135,7 +138,7 @@ class DemoServiceStore:
     def create_draft(self, recipient: str, subject: str, body: str) -> dict[str, Any]:
         draft_id = f"draft-{uuid4().hex[:12]}"
         created_at = datetime.now().astimezone().isoformat()
-        with connect(self.database_path) as connection:
+        with connect(self.database_target) as connection:
             connection.execute(
                 """
                 INSERT INTO mail_drafts(id, recipient, subject, body, created_at)
@@ -158,7 +161,7 @@ class DemoServiceStore:
         end_at = _parse_datetime(end)
         if end_at <= start_at:
             raise ValueError("Calendar range end must be after start")
-        with connect(self.database_path) as connection:
+        with connect(self.database_target) as connection:
             rows = connection.execute(
                 """
                 SELECT * FROM calendar_events
@@ -230,7 +233,7 @@ class DemoServiceStore:
             "description": description,
             "source": "daypilot",
         }
-        with connect(self.database_path) as connection:
+        with connect(self.database_target) as connection:
             connection.execute(
                 """
                 INSERT INTO calendar_events(id, title, start_at, end_at, description, source)
@@ -242,7 +245,7 @@ class DemoServiceStore:
         return {**result, "status": "created"}
 
     def list_tasks(self) -> dict[str, Any]:
-        with connect(self.database_path) as connection:
+        with connect(self.database_target) as connection:
             rows = connection.execute(
                 "SELECT * FROM tasks ORDER BY completed, COALESCE(due_at, '9999'), created_at"
             ).fetchall()
@@ -266,7 +269,7 @@ class DemoServiceStore:
             "completed": False,
             "created_at": created_at,
         }
-        with connect(self.database_path) as connection:
+        with connect(self.database_target) as connection:
             connection.execute(
                 """
                 INSERT INTO tasks(id, title, notes, due_at, completed, created_at)
@@ -291,7 +294,7 @@ class DemoServiceStore:
         return {"tasks": created, "count": len(created), "status": "created"}
 
     def complete_task(self, task_id: str) -> dict[str, Any]:
-        with connect(self.database_path) as connection:
+        with connect(self.database_target) as connection:
             cursor = connection.execute(
                 "UPDATE tasks SET completed = 1 WHERE id = ? AND completed = 0", (task_id,)
             )
@@ -310,7 +313,7 @@ class DemoServiceStore:
         """Search only the controlled workspace-file corpus and return safe metadata."""
         limit = max(1, min(limit, 25))
         tokens = _search_tokens(query)
-        with connect(self.database_path) as connection:
+        with connect(self.database_target) as connection:
             rows = connection.execute(
                 """
                 SELECT id, filename, file_type, description, modified_at, size_bytes, content
@@ -344,7 +347,7 @@ class DemoServiceStore:
         if query and query.strip():
             return self.search_files(query, limit)
         limit = max(1, min(limit, 50))
-        with connect(self.database_path) as connection:
+        with connect(self.database_target) as connection:
             rows = connection.execute(
                 """
                 SELECT id, filename, file_type, description, modified_at, size_bytes
@@ -359,7 +362,7 @@ class DemoServiceStore:
 
     def get_file_metadata(self, file_id: str) -> dict[str, Any]:
         _validate_file_id(file_id)
-        with connect(self.database_path) as connection:
+        with connect(self.database_target) as connection:
             row = connection.execute(
                 """
                 SELECT id, filename, file_type, description, modified_at, size_bytes
@@ -373,7 +376,7 @@ class DemoServiceStore:
 
     def read_file(self, file_id: str) -> dict[str, Any]:
         _validate_file_id(file_id)
-        with connect(self.database_path) as connection:
+        with connect(self.database_target) as connection:
             row = connection.execute(
                 "SELECT * FROM workspace_files WHERE id = ?", (file_id,)
             ).fetchone()
@@ -386,7 +389,7 @@ class DemoServiceStore:
         """Search published posts in the fictional public X corpus."""
         limit = max(1, min(limit, 25))
         tokens = _search_tokens(query)
-        with connect(self.database_path) as connection:
+        with connect(self.database_target) as connection:
             rows = connection.execute(
                 """
                 SELECT * FROM x_posts
@@ -412,7 +415,7 @@ class DemoServiceStore:
     def get_post(self, post_id: str) -> dict[str, Any]:
         if not re.fullmatch(r"x-(?:post|draft)-[a-z0-9-]+", post_id):
             raise ValueError("Post ID must be a controlled X post identifier")
-        with connect(self.database_path) as connection:
+        with connect(self.database_target) as connection:
             row = connection.execute("SELECT * FROM x_posts WHERE id = ?", (post_id,)).fetchone()
         if row is None:
             raise ValueError(f"X post {post_id!r} was not found in the demo store")
@@ -423,7 +426,7 @@ class DemoServiceStore:
         normalized = username.strip().lstrip("@").lower()
         if not normalized:
             raise ValueError("username must not be empty")
-        with connect(self.database_path) as connection:
+        with connect(self.database_target) as connection:
             rows = connection.execute(
                 """
                 SELECT * FROM x_posts
@@ -439,7 +442,7 @@ class DemoServiceStore:
         normalized = _validate_post_text(text)
         draft_id = f"x-draft-{uuid4().hex[:12]}"
         created_at = datetime.now().astimezone().isoformat()
-        with connect(self.database_path) as connection:
+        with connect(self.database_target) as connection:
             connection.execute(
                 """
                 INSERT INTO x_posts(
@@ -455,7 +458,7 @@ class DemoServiceStore:
     def publish_post(self, text: str, draft_id: str | None = None) -> dict[str, Any]:
         normalized_draft_id = draft_id.strip() if draft_id else None
         normalized_text = text.strip()
-        with connect(self.database_path) as connection:
+        with connect(self.database_target) as connection:
             existing = None
             if normalized_draft_id:
                 if not re.fullmatch(r"x-draft-[a-z0-9-]+", normalized_draft_id):

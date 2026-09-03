@@ -16,6 +16,7 @@ from langchain_mcp_adapters.client import MultiServerMCPClient
 
 from backend.app.config import Settings
 from backend.app.domain.errors import ProviderUnavailableError
+from backend.app.persistence.database import connect_sync
 from backend.app.providers.managed_state import ManagedStateStore
 
 try:  # Keep demo/direct mode importable when the optional managed extra is absent.
@@ -88,7 +89,7 @@ class ComposioManagedClient:
         mcp_client_factory: Callable[..., Any] | None = None,
     ) -> None:
         self.settings = settings
-        self.state = state or ManagedStateStore(settings.database_path)
+        self.state = state or ManagedStateStore(settings.database_target)
         self._composio_factory = composio_factory
         self._mcp_client_factory = mcp_client_factory or MultiServerMCPClient
         self._client_instance: Any | None = None
@@ -356,7 +357,15 @@ class ComposioManagedClient:
         message = _safe_error(str(exc))
         if self.settings.composio_api_key:
             message = message.replace(self.settings.composio_api_key, "[redacted]")
-        logger.warning("%s: %s", prefix, message)
+        lowered = message.lower()
+        category = (
+            "rate_limited"
+            if "429" in lowered or "quota" in lowered or "rate limit" in lowered
+            else "authentication"
+            if "auth" in lowered or "credential" in lowered
+            else type(exc).__name__
+        )
+        logger.warning("%s (%s)", prefix, category)
         return ProviderUnavailableError(f"{prefix}. Try again shortly.")
 
 
@@ -734,15 +743,14 @@ class ManagedXService:
         account = self.client.account(X_TOOLKIT)
         if not account or str(account.get("status")) != "ACTIVE":
             raise ProviderUnavailableError("X is not connected through Composio. Connect X first.")
-        import sqlite3
         from time import gmtime, strftime
         from uuid import uuid4
 
-        ensure_managed_schema(self.settings.database_path)
+        ensure_managed_schema(self.settings.database_target)
         post_id = f"x-draft-{uuid4().hex[:12]}"
         account_label = str(account.get("account_label") or "managed X account")
         now = strftime("%Y-%m-%dT%H:%M:%SZ", gmtime())
-        with sqlite3.connect(self.settings.database_path) as connection:
+        with connect_sync(self.settings.database_target) as connection:
             connection.execute(
                 "INSERT INTO x_posts("
                 "id, username, display_name, text, created_at, published_at, status, source) "
@@ -774,10 +782,9 @@ class ManagedXService:
         if not post_id:
             raise ProviderUnavailableError("Composio published an X post without returning its ID.")
         if draft_id:
-            import sqlite3
             from time import gmtime, strftime
 
-            with sqlite3.connect(self.settings.database_path) as connection:
+            with connect_sync(self.settings.database_target) as connection:
                 connection.execute(
                     "UPDATE x_posts SET status = 'published', published_at = ? WHERE id = ?",
                     (strftime("%Y-%m-%dT%H:%M:%SZ", gmtime()), draft_id),
@@ -795,10 +802,10 @@ class ManagedXService:
         )
 
 
-def ensure_managed_schema(database_path) -> None:
+def ensure_managed_schema(database_target) -> None:
     from mcp_servers.common.database import ensure_demo_database_schema
 
-    ensure_demo_database_schema(database_path)
+    ensure_demo_database_schema(database_target)
 
 
 def _run_async(coro: Any) -> Any:
@@ -1049,11 +1056,8 @@ def _normalise_managed_post(
 
 
 def _managed_local_draft(settings: Settings, post_id: str) -> dict[str, Any]:
-    import sqlite3
-
-    ensure_managed_schema(settings.database_path)
-    with sqlite3.connect(settings.database_path) as connection:
-        connection.row_factory = sqlite3.Row
+    ensure_managed_schema(settings.database_target)
+    with connect_sync(settings.database_target) as connection:
         row = connection.execute("SELECT * FROM x_posts WHERE id = ?", (post_id,)).fetchone()
     if row is None:
         raise ValueError(f"DayPilot X draft {post_id!r} was not found")

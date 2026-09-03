@@ -12,10 +12,12 @@ services:
         value: "3.13.1"
       - key: DAYPILOT_DEMO_MODE
         value: "false"
+      - key: DAYPILOT_PUBLIC_DEMO_MODE
+        value: "true"
       - key: DAYPILOT_PROVIDER_MODE
         value: managed
       - key: DATABASE_URL
-        value: sqlite:///./data/daypilot.db
+        sync: false
       - key: DAYPILOT_TIMEZONE
         value: Asia/Kolkata
       - key: TAVILY_BASE_URL
@@ -26,8 +28,10 @@ services:
         sync: false
       - key: COMPOSIO_API_KEY
         sync: false
+      - key: DAYPILOT_ADMIN_SECRET
+        sync: false
       - key: COMPOSIO_CALLBACK_URL
-        value: https://daypilot-api.onrender.com/api/connections/managed/callback
+        value: https://daypilot-2z65.onrender.com/api/connections/managed/callback
       - key: DAYPILOT_SITE_URL
         value: https://daypilot.dumpydon.workers.dev
       - key: CORS_ORIGINS

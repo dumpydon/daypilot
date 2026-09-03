@@ -185,6 +185,15 @@ async def test_read_only_availability_question_has_no_calendar_write_operation()
 
 
 @pytest.mark.asyncio
+async def test_incomplete_tasks_is_read_only_not_a_complete_task_command() -> None:
+    intent = await DeterministicReasoner("Asia/Kolkata").understand("Show my incomplete tasks")
+
+    assert intent.requested_operations == []
+    assert "review_tasks" in intent.requested_outcomes
+    assert "complete_task" not in intent.requested_outcomes
+
+
+@pytest.mark.asyncio
 async def test_single_google_task_uses_single_write_and_explains_due_date_only_semantics() -> None:
     request = (
         'Create a Google Task called "DayPilTasks dated verification" due tomorrow at 7:00 PM.'

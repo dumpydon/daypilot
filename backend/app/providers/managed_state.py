@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import sqlite3
-from pathlib import Path
 from uuid import uuid4
+
+from backend.app.persistence.database import DatabaseTarget, connect_sync
 
 
 class ManagedStateStore:
@@ -13,13 +13,12 @@ class ManagedStateStore:
     its MCP adapters.
     """
 
-    def __init__(self, database_path: Path) -> None:
-        self.database_path = database_path
-        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, database_target: DatabaseTarget) -> None:
+        self.database_target = database_target
         self._ensure_schema()
 
     def _ensure_schema(self) -> None:
-        with sqlite3.connect(self.database_path) as connection:
+        with connect_sync(self.database_target) as connection:
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS installation_identity (
@@ -45,12 +44,12 @@ class ManagedStateStore:
             )
 
     def ensure_user_id(self) -> str:
-        with sqlite3.connect(self.database_path) as connection:
+        with connect_sync(self.database_target) as connection:
             row = connection.execute(
                 "SELECT user_id FROM installation_identity WHERE id = 1"
             ).fetchone()
             if row:
-                return str(row[0])
+                return str(row["user_id"])
             user_id = f"daypilot-{uuid4().hex}"
             connection.execute(
                 "INSERT INTO installation_identity(id, user_id, created_at) "
@@ -65,8 +64,7 @@ class ManagedStateStore:
         return f"composio:{toolkit}"
 
     def session(self, toolkit: str) -> dict[str, str] | None:
-        with sqlite3.connect(self.database_path) as connection:
-            connection.row_factory = sqlite3.Row
+        with connect_sync(self.database_target) as connection:
             row = connection.execute(
                 "SELECT provider, session_id, user_id, updated_at FROM managed_sessions "
                 "WHERE provider = ?",
@@ -75,7 +73,7 @@ class ManagedStateStore:
         return dict(row) if row else None
 
     def set_session(self, toolkit: str, session_id: str, user_id: str) -> None:
-        with sqlite3.connect(self.database_path) as connection:
+        with connect_sync(self.database_target) as connection:
             connection.execute(
                 """
                 INSERT INTO managed_sessions(provider, session_id, user_id, updated_at)
@@ -90,7 +88,7 @@ class ManagedStateStore:
             connection.commit()
 
     def delete_session(self, toolkit: str) -> None:
-        with sqlite3.connect(self.database_path) as connection:
+        with connect_sync(self.database_target) as connection:
             connection.execute(
                 "DELETE FROM managed_sessions WHERE provider = ?",
                 (self._session_key(toolkit),),
@@ -98,8 +96,7 @@ class ManagedStateStore:
             connection.commit()
 
     def account(self, toolkit: str) -> dict[str, str | None] | None:
-        with sqlite3.connect(self.database_path) as connection:
-            connection.row_factory = sqlite3.Row
+        with connect_sync(self.database_target) as connection:
             row = connection.execute(
                 "SELECT toolkit, account_id, status, account_label, last_error, updated_at "
                 "FROM managed_accounts WHERE toolkit = ?",
@@ -115,7 +112,7 @@ class ManagedStateStore:
         account_label: str | None = None,
         last_error: str | None = None,
     ) -> None:
-        with sqlite3.connect(self.database_path) as connection:
+        with connect_sync(self.database_target) as connection:
             connection.execute(
                 """
                 INSERT INTO managed_accounts(
@@ -133,6 +130,6 @@ class ManagedStateStore:
             connection.commit()
 
     def delete_account(self, toolkit: str) -> None:
-        with sqlite3.connect(self.database_path) as connection:
+        with connect_sync(self.database_target) as connection:
             connection.execute("DELETE FROM managed_accounts WHERE toolkit = ?", (toolkit,))
             connection.commit()

@@ -18,6 +18,7 @@ import styles from "./workspace.module.css";
 interface ConnectionSettingsProps {
   catalog: ConnectionCatalog;
   fileRoots: FileRoot[];
+  publicDemoMode?: boolean;
   onConnectGoogle: () => Promise<void>;
   onDisconnectGoogle: () => Promise<void>;
   onConnectX: () => Promise<void>;
@@ -29,6 +30,7 @@ interface ConnectionSettingsProps {
 export function ConnectionSettings({
   catalog,
   fileRoots,
+  publicDemoMode = false,
   onConnectGoogle,
   onDisconnectGoogle,
   onConnectX,
@@ -80,7 +82,7 @@ export function ConnectionSettings({
         <Globe2 size={14} />
         <div>
           <strong id="connections-title">Connected services</strong>
-          <p>{catalog.demo_mode ? "DayPilot demo providers are active. Set connected mode in the backend to use real accounts." : "Provider access stays behind the MCP boundary."}</p>
+          <p>{publicDemoMode ? "Personal services are available to the owner after admin unlock." : catalog.demo_mode ? "DayPilot demo providers are active. Set connected mode in the backend to use real accounts." : "Provider access stays behind the MCP boundary."}</p>
         </div>
       </div>
 
@@ -92,6 +94,7 @@ export function ConnectionSettings({
           connection={googleSummary}
           account={google.find((item) => item.account_label)?.account_label ?? undefined}
           demoMode={catalog.demo_mode}
+          publicDemoMode={publicDemoMode}
           warning={googleNeedsReconnect}
           busy={busy}
           actionLabel={googleConnecting || googleUnavailable ? undefined : googleConnected ? "Disconnect" : googleNeedsReconnect ? "Reconnect Google" : "Connect Google"}
@@ -104,6 +107,7 @@ export function ConnectionSettings({
           detail={`Local Mac · ${fileRoots.length} folder${fileRoots.length === 1 ? "" : "s"}`}
           connection={files}
           demoMode={catalog.demo_mode}
+          publicDemoMode={publicDemoMode}
           warning={files?.state === "error"}
           busy={busy}
           actionLabel={catalog.demo_mode ? undefined : folderManagerOpen ? "Hide folders" : "Manage folders"}
@@ -116,6 +120,7 @@ export function ConnectionSettings({
           detail={x?.account_label ? `${x.account_label} · X API` : "X account"}
           connection={x}
           demoMode={catalog.demo_mode}
+          publicDemoMode={publicDemoMode}
           warning={x?.requires_reauth}
           busy={busy}
           actionLabel={x?.state === "connecting" || x?.state === "unavailable" ? undefined : x?.provider !== "DayPilot demo" && x?.state === "connected" ? "Disconnect" : x?.requires_reauth ? "Reconnect X" : "Connect X"}
@@ -159,6 +164,7 @@ function ConnectionRow({
   connection,
   account,
   demoMode,
+  publicDemoMode = false,
   warning = false,
   busy,
   actionLabel,
@@ -170,6 +176,7 @@ function ConnectionRow({
   connection?: ProviderConnection;
   account?: string;
   demoMode: boolean;
+  publicDemoMode?: boolean;
   warning?: boolean;
   busy: boolean;
   actionLabel?: string;
@@ -180,8 +187,10 @@ function ConnectionRow({
     ? "Connected"
     : state === "connecting"
       ? "Connecting…"
-    : state === "demo"
+      : state === "demo"
       ? "DayPilot demo"
+      : publicDemoMode
+        ? "Available to admin only"
       : state === "unavailable" && connection?.connection_mode === "managed"
         ? "Managed connection unavailable"
       : state === "unavailable"
@@ -206,7 +215,7 @@ function ConnectionRow({
         {state === "connected" || state === "demo" ? <Check size={11} /> : warning ? <Link2Off size={11} /> : <X size={11} />}
         {stateLabel}
       </span>
-      {actionLabel && onAction && !demoMode && <button className={styles.connectionAction} type="button" onClick={onAction} disabled={busy}>{actionLabel}</button>}
+      {actionLabel && onAction && !demoMode && !publicDemoMode && <button className={styles.connectionAction} type="button" onClick={onAction} disabled={busy}>{actionLabel}</button>}
     </div>
   );
 }

@@ -199,6 +199,23 @@ describe("DayPilot operations workspace", () => {
     expect(screen.getByTestId("openai-runtime-indicator")).toHaveAttribute("data-runtime-state", "ready");
   });
 
+  it("shows a stable waking state without flashing fake demo or zero-server status", () => {
+    render(
+      <Header
+        servers={[]}
+        reasoningMode="unknown"
+        readinessState="starting"
+        publicDemoMode
+        onMenu={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Waking DayPilot…")).toBeInTheDocument();
+    expect(screen.getByText("Connecting services…")).toBeInTheDocument();
+    expect(screen.queryByText("Demo workspace")).not.toBeInTheDocument();
+    expect(screen.queryByText(/0\/6 MCP servers/)).not.toBeInTheDocument();
+  });
+
   it("marks Mail as used when search_mail succeeds without a thread read", () => {
     render(
       <ContextPanel
@@ -559,6 +576,85 @@ describe("DayPilot operations workspace", () => {
     expect(screen.getByRole("button", { name: "Connect Google" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Connect X" })).not.toBeInTheDocument();
     expect(screen.queryByText(/ToolRouterV2|auth configs|request id/i)).not.toBeInTheDocument();
+  });
+
+  it("keeps personal connection actions behind the public admin gate", () => {
+    const catalog = {
+      demo_mode: false,
+      connections: [
+        {
+          service: "mail" as const,
+          provider: "Google Workspace",
+          state: "unavailable" as const,
+          account_label: null,
+          capabilities: [],
+          last_error: "Available to admin only.",
+          requires_reauth: false,
+          metadata: {},
+          connection_mode: "managed" as const,
+        },
+      ],
+    };
+    render(
+      <ConnectionSettings
+        catalog={catalog}
+        fileRoots={[]}
+        publicDemoMode
+        onConnectGoogle={vi.fn(async () => {})}
+        onDisconnectGoogle={vi.fn(async () => {})}
+        onConnectX={vi.fn(async () => {})}
+        onDisconnectX={vi.fn(async () => {})}
+        onAddFileRoot={vi.fn(async () => {})}
+        onRemoveFileRoot={vi.fn(async () => {})}
+      />,
+    );
+    expect(screen.getAllByText("Available to admin only").length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: "Connect Google" })).not.toBeInTheDocument();
+  });
+
+  it("offers a small admin unlock entry point in public mode", async () => {
+    const onAdminLogin = vi.fn(async () => {});
+    render(
+      <PreferencesDialog
+        preferences={{ preferred_focus_block_minutes: 90, avoid_scheduling_after: "22:00", preferred_task_due_time: "18:00" }}
+        onClose={vi.fn()}
+        onSave={vi.fn()}
+        onResetDemoRequest={vi.fn()}
+        onClearHistoryRequest={vi.fn()}
+        maintenanceBlocked={false}
+        maintenanceMessage={null}
+        maintenanceBusy={false}
+        adminStatus={{ authenticated: false, public_demo_mode: true, expires_at: null, message: "Public demo mode." }}
+        onAdminLogin={onAdminLogin}
+        connections={{ demo_mode: false, connections: [] }}
+      />,
+    );
+    const code = screen.getByLabelText("Admin access code");
+    await userEvent.type(code, "owner-code");
+    await userEvent.click(screen.getByRole("button", { name: "Unlock" }));
+    expect(onAdminLogin).toHaveBeenCalledWith("owner-code");
+  });
+
+  it("shows and executes the explicit admin lock control", async () => {
+    const onAdminLogout = vi.fn(async () => {});
+    render(
+      <PreferencesDialog
+        preferences={{ preferred_focus_block_minutes: 90, avoid_scheduling_after: "22:00", preferred_task_due_time: "18:00" }}
+        onClose={vi.fn()}
+        onSave={vi.fn()}
+        onResetDemoRequest={vi.fn()}
+        onClearHistoryRequest={vi.fn()}
+        maintenanceBlocked={false}
+        maintenanceMessage={null}
+        maintenanceBusy={false}
+        adminStatus={{ authenticated: true, public_demo_mode: true, expires_at: null, message: "Admin mode enabled." }}
+        onAdminLogout={onAdminLogout}
+        connections={{ demo_mode: false, connections: [] }}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Lock admin mode" }));
+    expect(onAdminLogout).toHaveBeenCalledOnce();
   });
 
   it("renders a grounded demo calendar receipt and opens its stored details", async () => {
@@ -1209,6 +1305,14 @@ describe("DayPilot operations workspace", () => {
     expect(screen.queryByText("Interview preparation")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /try a demo/i })).toHaveAttribute("aria-expanded", "false");
     expect(screen.getByRole("button", { name: "Start DayPilot run" })).toBeDisabled();
+  });
+
+  it("disables every composer entry point while runtime initialization is unfinished", () => {
+    render(<RequestComposer onSubmit={vi.fn()} busy={false} disabled />);
+
+    expect(screen.getByRole("textbox", { name: "Goal" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Start DayPilot run" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /try a demo/i })).toBeDisabled();
   });
 
   it("uses the workspace-focused two-line headline with a stable rotating slot", () => {

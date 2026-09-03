@@ -80,18 +80,26 @@ def build_daypilot_graph(dependencies: WorkflowDependencies, checkpointer: Any):
         return {"final_summary": answer, "updated_at": _now()}
 
     async def discover_tools(state: DayPilotState) -> dict[str, Any]:
-        tools = await gateway.discover(force=True)
-        connected = sum(server["connected"] for server in gateway.catalog())
+        admin_authorized = bool(state.get("admin_authorized", False))
+        tools = await gateway.discover(force=True, admin_authorized=admin_authorized)
+        catalog = gateway.catalog(admin_authorized=admin_authorized)
+        connected = sum(server["connected"] for server in catalog)
         await repository.append_event(
             state["run_id"],
             "tools_discovered",
             EventState.COMPLETED if tools else EventState.FAILED,
             f"{len(tools)} MCP tools discovered",
-            f"{connected} of {len(gateway.catalog())} MCP servers connected",
-            {"servers": gateway.catalog()},
+            f"{connected} of {len(catalog)} MCP servers connected",
+            {"servers": catalog},
         )
         errors = list(state.get("errors", []))
-        for server in gateway.catalog():
+        for server in catalog:
+            if (
+                not admin_authorized
+                and gateway.public_restricted(admin_authorized)
+                and server["name"] != "web"
+            ):
+                continue
             if not server["connected"]:
                 errors.append(f"{server['name']} MCP unavailable: {server['error']}")
         return {
@@ -102,6 +110,7 @@ def build_daypilot_graph(dependencies: WorkflowDependencies, checkpointer: Any):
 
     async def gather_context(state: DayPilotState) -> dict[str, Any]:
         run_id = state["run_id"]
+        admin_authorized = bool(state.get("admin_authorized", False))
         tools = [ToolMetadata.model_validate(tool) for tool in state.get("available_tools", [])]
         intent = UserIntent.model_validate(state["intent"])
         preferences = PreferenceSet.model_validate(state["preferences"])
@@ -139,6 +148,7 @@ def build_daypilot_graph(dependencies: WorkflowDependencies, checkpointer: Any):
                     proposed.tool_name,
                     grounded_arguments,
                     proposed.reason,
+                    admin_authorized=admin_authorized,
                 )
             else:
                 record = await _invoke_read(
@@ -148,6 +158,7 @@ def build_daypilot_graph(dependencies: WorkflowDependencies, checkpointer: Any):
                     proposed.tool_name,
                     grounded_arguments,
                     proposed.reason,
+                    admin_authorized=admin_authorized,
                 )
             calls_made += 1
             server = record.pop("server_name")
@@ -173,6 +184,7 @@ def build_daypilot_graph(dependencies: WorkflowDependencies, checkpointer: Any):
                         follow_up_tool,
                         follow_up_arguments,
                         follow_up_reason,
+                        admin_authorized=admin_authorized,
                     )
                 else:
                     follow_up_record = await _invoke_read(
@@ -182,6 +194,7 @@ def build_daypilot_graph(dependencies: WorkflowDependencies, checkpointer: Any):
                         follow_up_tool,
                         follow_up_arguments,
                         follow_up_reason,
+                        admin_authorized=admin_authorized,
                     )
                 calls_made += 1
                 follow_up_server = follow_up_record.pop("server_name")
@@ -425,10 +438,12 @@ def build_daypilot_graph(dependencies: WorkflowDependencies, checkpointer: Any):
                 approved_actions=authorization_actions,
             )
             try:
-                result = await gateway.invoke(
+                result = await _invoke_gateway(
+                    gateway,
                     action.tool_name,
                     action.arguments,
                     authorization=authorization,
+                    admin_authorized=bool(state.get("admin_authorized", False)),
                 )
                 execution = ExecutionResult(
                     action_id=action.id,
@@ -451,16 +466,17 @@ def build_daypilot_graph(dependencies: WorkflowDependencies, checkpointer: Any):
                     {"action_id": action.id, "result": result},
                 )
             except Exception as exc:
+                failure = _safe_tool_failure(exc, action.server_name)
                 execution = ExecutionResult(
                     action_id=action.id,
                     tool_name=action.tool_name,
                     arguments=action.arguments,
                     success=False,
-                    error=str(exc),
+                    error=failure,
                     executed_at=datetime.now(UTC),
                 )
                 await repository.complete_execution(
-                    state["run_id"], action.id, success=False, error=str(exc)
+                    state["run_id"], action.id, success=False, error=failure
                 )
                 by_id[action.id].status = ActionStatus.FAILED
                 await repository.append_event(
@@ -468,7 +484,7 @@ def build_daypilot_graph(dependencies: WorkflowDependencies, checkpointer: Any):
                     "action_failed",
                     EventState.FAILED,
                     action.description,
-                    str(exc),
+                    failure,
                     {"action_id": action.id},
                 )
             results.append(execution.model_dump(mode="json"))
@@ -485,7 +501,13 @@ def build_daypilot_graph(dependencies: WorkflowDependencies, checkpointer: Any):
         for result in results:
             if not result.get("success"):
                 continue
-            verification = await _verify_result(state["run_id"], gateway, repository, result)
+            verification = await _verify_result(
+                state["run_id"],
+                gateway,
+                repository,
+                result,
+                admin_authorized=bool(state.get("admin_authorized", False)),
+            )
             verifications.append(verification)
             # Read-back recovery may enrich an otherwise successful provider
             # result with the real resource ID and URL. Persist that enrichment
@@ -609,6 +631,22 @@ def _route_after_approval(state: DayPilotState) -> Literal["approved", "edited",
     return "rejected"
 
 
+async def _invoke_gateway(
+    gateway: MCPGateway,
+    tool_name: str,
+    arguments: dict[str, Any],
+    *,
+    authorization: Any | None = None,
+    admin_authorized: bool = False,
+) -> Any:
+    kwargs: dict[str, Any] = {}
+    if authorization is not None:
+        kwargs["authorization"] = authorization
+    if admin_authorized:
+        kwargs["admin_authorized"] = True
+    return await gateway.invoke(tool_name, arguments, **kwargs)
+
+
 async def _invoke_read(
     run_id: str,
     gateway: MCPGateway,
@@ -616,6 +654,8 @@ async def _invoke_read(
     tool_name: str,
     arguments: dict[str, Any],
     reason: str,
+    *,
+    admin_authorized: bool = False,
 ) -> dict[str, Any]:
     metadata = gateway.metadata(tool_name)
     server_name = metadata.server_name if metadata else "unknown"
@@ -629,7 +669,12 @@ async def _invoke_read(
         {"tool_name": tool_name, "arguments": arguments, "risk": "SAFE_READ"},
     )
     try:
-        result = await gateway.invoke(tool_name, arguments)
+        result = await _invoke_gateway(
+            gateway,
+            tool_name,
+            arguments,
+            admin_authorized=admin_authorized,
+        )
         await repository.append_event(
             run_id,
             "tool_completed",
@@ -649,12 +694,13 @@ async def _invoke_read(
             "error": None,
         }
     except Exception as exc:
+        failure = _safe_tool_failure(exc, server_name)
         await repository.append_event(
             run_id,
             "tool_failed",
             EventState.FAILED,
             description,
-            str(exc),
+            failure,
             {"tool_name": tool_name},
         )
         return {
@@ -665,8 +711,20 @@ async def _invoke_read(
             "reason": reason,
             "result": None,
             "success": False,
-            "error": f"{tool_name}: {exc}",
+            "error": f"{tool_name}: {failure}",
         }
+
+
+def _safe_tool_failure(exc: Exception, server_name: str) -> str:
+    """Return a useful provider error without leaking upstream response details."""
+    lowered = str(exc).lower()
+    if "unauthorized" in lowered or "admin" in lowered:
+        return "Personal connected services are available only in admin mode."
+    if "tavily" in lowered or server_name == "web":
+        return "Fresh web research is currently unavailable."
+    if any(token in lowered for token in ("429", "rate limit", "quota")):
+        return f"{server_name.title()} is temporarily rate limited. Try again shortly."
+    return f"{server_name.title()} capability is not available right now."
 
 
 async def _blocked_read(
@@ -676,6 +734,8 @@ async def _blocked_read(
     tool_name: str,
     arguments: dict[str, Any],
     reason: str,
+    *,
+    admin_authorized: bool = False,
 ) -> dict[str, Any]:
     """Record a read that cannot safely run because its inputs are unresolved.
 
@@ -763,14 +823,18 @@ async def _verify_result(
     gateway: MCPGateway,
     repository: DayPilotRepository,
     result: dict[str, Any],
+    *,
+    admin_authorized: bool = False,
 ) -> dict[str, Any]:
     payload = result.get("result") or {}
     tool_name = result["tool_name"]
     try:
         if tool_name == "create_event":
-            read_back = await gateway.invoke(
+            read_back = await _invoke_gateway(
+                gateway,
                 "list_events",
                 {"start": payload["start_at"], "end": payload["end_at"]},
+                admin_authorized=admin_authorized,
             )
             events = [event for event in read_back.get("events", []) if isinstance(event, dict)]
             exact = [event for event in events if _event_matches(event, payload)]
@@ -806,7 +870,12 @@ async def _verify_result(
                 **({"provider_resource_id": identified.get("id")} if identified else {}),
             }
         elif tool_name in {"create_task", "create_task_batch", "complete_task"}:
-            read_back = await gateway.invoke("list_tasks", {})
+            read_back = await _invoke_gateway(
+                gateway,
+                "list_tasks",
+                {},
+                admin_authorized=admin_authorized,
+            )
             expected = payload.get("tasks", []) if tool_name == "create_task_batch" else [payload]
             expected = [task for task in expected if isinstance(task, dict)]
             if not expected or any(not task.get("id") for task in expected):
@@ -841,17 +910,32 @@ async def _verify_result(
                         "no retry was attempted."
                     ),
                 }
-            read_back = await gateway.invoke("get_message", {"message_id": message_id})
+            read_back = await _invoke_gateway(
+                gateway,
+                "get_message",
+                {"message_id": message_id},
+                admin_authorized=admin_authorized,
+            )
             verified = read_back.get("id") == message_id
             if payload.get("subject"):
                 verified = verified and read_back.get("subject") == payload["subject"]
             if payload.get("body"):
                 verified = verified and payload["body"][:200] in str(read_back.get("body", ""))
         elif tool_name == "create_post_draft":
-            read_back = await gateway.invoke("get_post", {"post_id": payload["id"]})
+            read_back = await _invoke_gateway(
+                gateway,
+                "get_post",
+                {"post_id": payload["id"]},
+                admin_authorized=admin_authorized,
+            )
             verified = read_back.get("id") == payload["id"] and read_back.get("status") == "draft"
         elif tool_name == "publish_post":
-            read_back = await gateway.invoke("get_post", {"post_id": payload["id"]})
+            read_back = await _invoke_gateway(
+                gateway,
+                "get_post",
+                {"post_id": payload["id"]},
+                admin_authorized=admin_authorized,
+            )
             verified = (
                 read_back.get("id") == payload["id"] and read_back.get("status") == "published"
             )

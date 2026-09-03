@@ -26,5 +26,6 @@ class DayPilotState(TypedDict, total=False):
     final_summary: str | None
     preferences: dict[str, Any]
     reasoning_mode: str
+    admin_authorized: bool
     created_at: str
     updated_at: str

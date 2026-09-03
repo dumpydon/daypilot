@@ -39,10 +39,20 @@ class RunCoordinator:
         self._tasks: set[asyncio.Task[Any]] = set()
         self._revision_locks: dict[str, asyncio.Lock] = {}
 
-    async def start_run(self, user_request: str) -> RunAccepted:
+    async def start_run(
+        self,
+        user_request: str,
+        *,
+        admin_authorized: bool = False,
+    ) -> RunAccepted:
         run_id = f"run-{uuid4().hex[:12]}"
         thread_id = f"thread-{uuid4().hex}"
-        await self.repository.create_run(run_id, thread_id, user_request)
+        await self.repository.create_run(
+            run_id,
+            thread_id,
+            user_request,
+            admin_authorized=admin_authorized,
+        )
         await self.repository.append_event(
             run_id,
             "request_received",
@@ -71,6 +81,7 @@ class RunCoordinator:
             "final_summary": None,
             "preferences": preferences.model_dump(mode="json"),
             "reasoning_mode": "pending",
+            "admin_authorized": admin_authorized,
             "created_at": now,
             "updated_at": now,
         }
@@ -156,7 +167,7 @@ class RunCoordinator:
                 raise PlanRevisionError(message) from exc
             except Exception as exc:
                 await self._record_failure(run_id, exc)
-                raise PlanRevisionError(f"Plan revision failed: {exc}") from exc
+                raise PlanRevisionError(f"Plan revision failed: {_friendly_failure(exc)}") from exc
 
             revised = await self.get_detail(run_id)
             if revised.status == RunStatus.FAILED:
@@ -220,13 +231,14 @@ class RunCoordinator:
             await self._record_failure(run_id, exc)
 
     async def _record_failure(self, run_id: str, exc: Exception) -> None:
-        await self.repository.fail_run(run_id, str(exc))
+        message = _friendly_failure(exc)
+        await self.repository.fail_run(run_id, message)
         await self.repository.append_event(
             run_id,
             "run_failed",
             EventState.FAILED,
             "Run failed safely",
-            str(exc),
+            message,
         )
 
     def _spawn(self, coroutine: Any) -> None:
@@ -236,3 +248,22 @@ class RunCoordinator:
 
     def _config(self, thread_id: str) -> dict[str, dict[str, str]]:
         return {"configurable": {"thread_id": thread_id}}
+
+
+def _friendly_failure(exc: Exception) -> str:
+    """Keep expected provider failures actionable without exposing raw traces."""
+    message = str(exc).replace("\n", " ").replace("\r", " ")[:500]
+    lowered = message.lower()
+    if "billing_not_active" in lowered or (
+        "openai" in lowered and any(token in lowered for token in ("429", "quota", "rate limit"))
+    ):
+        return "OpenAI is currently unavailable because its quota or billing limit was reached."
+    if "api key" in lowered or "authentication" in lowered:
+        return "OpenAI authentication is unavailable. Check the server configuration."
+    if "tavily" in lowered:
+        return "Fresh web research is currently unavailable."
+    if "rate limit" in lowered or "429" in lowered:
+        return "A connected provider is currently rate limiting requests. Try again shortly."
+    if "mcp" in lowered or "provider" in lowered:
+        return "A connected service is currently unavailable. Check the service status and retry."
+    return message or "DayPilot could not complete this run."

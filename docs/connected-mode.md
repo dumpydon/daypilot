@@ -30,6 +30,15 @@ OAuth client or X developer credentials are needed for managed connections.
 4. Click Connect Google, complete the hosted Composio authorization, then repeat with
    Connect X. Add local Files folders with Manage folders.
 
+For the public Render/Cloudflare deployment, use a hosted PostgreSQL
+`DATABASE_URL`, set `DAYPILOT_PUBLIC_DEMO_MODE=true`, configure a strong
+`DAYPILOT_ADMIN_SECRET`, and set `DAYPILOT_SITE_URL` to the Cloudflare origin.
+Anonymous visitors receive a sanitized capability catalog; only an authenticated
+admin session can access connected Google services or connection controls.
+The application and LangGraph PostgreSQL schemas are created on first boot; move
+existing SQLite records/checkpoints separately before cutover if they must remain
+available.
+
 DayPilot never asks for tokens in chat and never sends access or refresh tokens to the
 frontend. Composio Connect Links and callback results contain only short-lived
 redirect/status data. The stable local Composio user ID is generated once and stored in

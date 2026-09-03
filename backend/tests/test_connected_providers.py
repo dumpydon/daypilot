@@ -604,7 +604,7 @@ def test_managed_composio_session_is_curated_and_auth_is_server_side(tmp_path: P
 
 
 def test_managed_sessions_have_independent_toolkit_failure_boundaries(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, caplog
 ) -> None:
     import backend.app.providers.composio as composio_module
 
@@ -635,6 +635,8 @@ def test_managed_sessions_have_independent_toolkit_failure_boundaries(
     with pytest.raises(ProviderUnavailableError, match="Try again shortly") as failure:
         client._session(GOOGLE_TOOLKIT)
     assert "internal response" not in str(failure.value)
+    assert "internal response" not in caplog.text
+    assert "google auth config" not in caplog.text
     assert client._session(X_TOOLKIT).session_id == "session-twitter"
     assert state.session(GOOGLE_TOOLKIT) is None
     assert state.session(X_TOOLKIT)["session_id"] == "session-twitter"

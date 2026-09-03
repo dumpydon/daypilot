@@ -1,7 +1,7 @@
-import { Clock3, Database, History, X } from "lucide-react";
+import { Clock3, Database, History, KeyRound, LockKeyhole, X } from "lucide-react";
 import { FormEvent, useState } from "react";
 
-import type { ConnectionCatalog, FileRoot, Preferences } from "@/lib/types";
+import type { AdminStatus, ConnectionCatalog, FileRoot, Preferences } from "@/lib/types";
 
 import { ConnectionSettings } from "./ConnectionSettings";
 import styles from "./workspace.module.css";
@@ -15,6 +15,9 @@ interface PreferencesDialogProps {
   maintenanceBlocked: boolean;
   maintenanceMessage: string | null;
   maintenanceBusy: boolean;
+  adminStatus?: AdminStatus;
+  onAdminLogin?: (accessCode: string) => Promise<void>;
+  onAdminLogout?: () => Promise<void>;
   connections?: ConnectionCatalog;
   fileRoots?: FileRoot[];
   onConnectGoogle?: () => Promise<void>;
@@ -34,6 +37,9 @@ export function PreferencesDialog({
   maintenanceBlocked,
   maintenanceMessage,
   maintenanceBusy,
+  adminStatus,
+  onAdminLogin = noopAdminLogin,
+  onAdminLogout = noopAdminLogout,
   connections,
   fileRoots = [],
   onConnectGoogle = noopAsync,
@@ -45,11 +51,40 @@ export function PreferencesDialog({
 }: PreferencesDialogProps) {
   const [draft, setDraft] = useState(preferences);
   const [busy, setBusy] = useState(false);
+  const [accessCode, setAccessCode] = useState("");
+  const [adminBusy, setAdminBusy] = useState(false);
+  const [adminError, setAdminError] = useState<string | null>(null);
   async function submit(event: FormEvent) {
     event.preventDefault();
     setBusy(true);
     try { await onSave(draft); onClose(); } finally { setBusy(false); }
   }
+  async function login() {
+    if (!accessCode.trim() || adminBusy) return;
+    setAdminBusy(true);
+    setAdminError(null);
+    try {
+      await onAdminLogin(accessCode);
+      setAccessCode("");
+    } catch (cause) {
+      setAdminError(cause instanceof Error ? cause.message : "Admin access could not be enabled.");
+    } finally {
+      setAdminBusy(false);
+    }
+  }
+  async function logout() {
+    if (adminBusy) return;
+    setAdminBusy(true);
+    setAdminError(null);
+    try { await onAdminLogout(); }
+    catch (cause) { setAdminError(cause instanceof Error ? cause.message : "Admin mode could not be locked."); }
+    finally { setAdminBusy(false); }
+  }
+  const publicDemoMode = Boolean(
+    adminStatus?.public_demo_mode
+      || connections?.connections.some((connection) => connection.last_error === "Available to admin only."),
+  );
+  const authenticated = adminStatus?.authenticated ?? false;
   return (
     <div className={styles.dialogBackdrop} role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <form className={styles.dialog} onSubmit={submit} role="dialog" aria-modal="true" aria-labelledby="preferences-title">
@@ -62,6 +97,7 @@ export function PreferencesDialog({
           <ConnectionSettings
             catalog={connections}
             fileRoots={fileRoots}
+            publicDemoMode={Boolean(publicDemoMode && !adminStatus?.authenticated)}
             onConnectGoogle={onConnectGoogle}
             onDisconnectGoogle={onDisconnectGoogle}
             onConnectX={onConnectX}
@@ -69,6 +105,23 @@ export function PreferencesDialog({
             onAddFileRoot={onAddFileRoot}
             onRemoveFileRoot={onRemoveFileRoot}
           />
+        )}
+        {publicDemoMode && (
+          <div className={styles.settingsSection}>
+            <div className={styles.settingsSectionHeader}>
+              {authenticated ? <LockKeyhole size={14} /> : <KeyRound size={14} />}
+              <div><strong>Admin access</strong><p>{authenticated ? "Personal services are enabled in this browser session." : "Unlock personal services for this browser only."}</p></div>
+            </div>
+            {authenticated ? (
+              <button className={styles.secondaryButton} type="button" onClick={logout} disabled={adminBusy}>Lock admin mode</button>
+            ) : (
+              <div className={styles.adminAccessRow}>
+                <input type="password" aria-label="Admin access code" value={accessCode} onChange={(event) => setAccessCode(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void login(); } }} placeholder="Access code" autoComplete="off" />
+                <button className={styles.secondaryButton} type="button" onClick={login} disabled={adminBusy || !accessCode.trim()}>{adminBusy ? "Unlocking…" : "Unlock"}</button>
+              </div>
+            )}
+            {adminError && <p className={styles.connectionError} role="alert">{adminError}</p>}
+          </div>
         )}
         <div className={styles.settingsDivider} />
         {(!connections || connections.demo_mode) && (
@@ -109,3 +162,5 @@ export function PreferencesDialog({
 }
 
 async function noopAsync() {}
+async function noopAdminLogin() {}
+async function noopAdminLogout() {}

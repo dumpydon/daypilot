@@ -10,9 +10,20 @@ interface HeaderProps {
   reasoningMode: string;
   onMenu: () => void;
   active?: boolean;
+  readinessState?: "starting" | "ready" | "degraded";
+  publicDemoMode?: boolean;
+  adminAuthenticated?: boolean;
 }
 
-export function Header({ servers, reasoningMode, onMenu, active = false }: HeaderProps) {
+export function Header({
+  servers,
+  reasoningMode,
+  onMenu,
+  active = false,
+  readinessState = "ready",
+  publicDemoMode = false,
+  adminAuthenticated = false,
+}: HeaderProps) {
   const connected = servers.filter((server) => server.connected).length;
   const realConnected = servers.filter(
     (server) => server.connected
@@ -24,6 +35,8 @@ export function Header({ servers, reasoningMode, onMenu, active = false }: Heade
     (server) => server.provider && server.provider !== "DayPilot demo",
   );
   const openAIReady = reasoningMode === "openai";
+  const waking = readinessState === "starting";
+  const publicVisitor = publicDemoMode && !adminAuthenticated;
   return (
     <header className={styles.header}>
       <button className={styles.mobileMenu} onClick={onMenu} aria-label="Open navigation">
@@ -41,9 +54,21 @@ export function Header({ servers, reasoningMode, onMenu, active = false }: Heade
       </a>
       <div className={styles.runtime}>
         <span className={styles.demoBadge}>
-          {!hasConfiguredProvider ? "Demo workspace" : realConnected > 1 ? "Connected workspace" : `${realConnected}/5 connected`}
+          {waking
+            ? "Waking DayPilot…"
+            : publicDemoMode && !adminAuthenticated
+              ? "Public demo"
+              : !hasConfiguredProvider
+                ? "Demo workspace"
+                : realConnected > 1
+                  ? "Connected workspace"
+                  : `${realConnected}/5 connected`}
         </span>
-        <span className={styles.serverHealth} aria-label={`${connected}/${servers.length} MCP servers`}><Cable size={13} /><i className={connected === servers.length ? styles.okDot : styles.warnDot} /><strong>{connected}/{servers.length}</strong> MCP servers</span>
+        <span className={styles.serverHealth} aria-label={waking ? "MCP servers connecting" : publicVisitor ? "Public demo services ready" : `${connected}/${servers.length} MCP servers`}>
+          <Cable size={13} />
+          <i className={waking ? styles.warnDot : publicVisitor && readinessState === "ready" ? styles.okDot : connected === servers.length ? styles.okDot : styles.warnDot} />
+          {waking ? "Connecting services…" : publicVisitor ? readinessState === "ready" ? "Public demo · Web ready" : "Public demo · Limited services" : <><strong>{connected}/{servers.length}</strong> MCP servers</>}
+        </span>
         <span className={styles.runtimeStack} role="group" aria-label="Runtime status">
           <span>
             <i

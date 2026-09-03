@@ -80,7 +80,7 @@ class DynamicService:
 
     def _current(self) -> Any:
         mode = ProviderModeStore(
-            self.settings.database_path,
+            self.settings.database_target,
             {name: self.settings.configured_provider(name) for name in ProviderModeStore.SERVICES},
         ).get(self.service)
         if self.settings.daypilot_demo_mode:
@@ -97,7 +97,7 @@ def build_dynamic_service(service: str, settings: Settings) -> DynamicService:
 
 def build_service(service: str, settings: Settings) -> Any:
     mode = ProviderModeStore(
-        settings.database_path,
+        settings.database_target,
         {name: settings.configured_provider(name) for name in ProviderModeStore.SERVICES},
     ).get(service)
     if mode == "direct":
@@ -110,7 +110,7 @@ def build_service(service: str, settings: Settings) -> Any:
         }[service]
     if settings.daypilot_demo_mode or mode == "demo":
         return ProvenanceService(
-            DemoServiceStore(settings.database_path, settings.daypilot_timezone),
+            DemoServiceStore(settings.database_target, settings.daypilot_timezone),
             "DayPilot demo",
             "demo",
             "demo",

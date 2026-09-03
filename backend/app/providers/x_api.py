@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sqlite3
 import time
 from typing import Any
 from urllib.parse import quote
@@ -10,6 +9,7 @@ import httpx
 
 from backend.app.config import Settings
 from backend.app.domain.errors import ProviderUnavailableError
+from backend.app.persistence.database import connect_sync
 from backend.app.providers.credentials import EncryptedCredentialStore
 from backend.app.providers.models import CredentialRecord
 from mcp_servers.common.database import ensure_demo_database_schema
@@ -146,8 +146,8 @@ class ConnectedXService:
 
     def __init__(self, settings: Settings, transport: httpx.BaseTransport | None = None) -> None:
         self.settings = settings
-        self.database_path = settings.database_path
-        ensure_demo_database_schema(self.database_path)
+        self.database_target = settings.database_target
+        ensure_demo_database_schema(self.database_target)
         self.store = EncryptedCredentialStore(
             settings.credential_path, settings.credential_key_path
         )
@@ -225,7 +225,7 @@ class ConnectedXService:
         post_id = f"x-draft-{uuid4().hex[:12]}"
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         account = credential.account_label or "connected X account"
-        with sqlite3.connect(self.database_path) as connection:
+        with connect_sync(self.database_target) as connection:
             connection.execute(
                 """
                 INSERT INTO x_posts(
@@ -254,7 +254,7 @@ class ConnectedXService:
         if not post_id:
             raise ProviderUnavailableError("X accepted the request without returning a post ID.")
         if draft_id:
-            with sqlite3.connect(self.database_path) as connection:
+            with connect_sync(self.database_target) as connection:
                 connection.execute(
                     "UPDATE x_posts SET status = 'published', published_at = ? WHERE id = ?",
                     (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), draft_id),
@@ -270,8 +270,7 @@ class ConnectedXService:
         }
 
     def _get_local_post(self, post_id: str) -> dict[str, Any]:
-        with sqlite3.connect(self.database_path) as connection:
-            connection.row_factory = sqlite3.Row
+        with connect_sync(self.database_target) as connection:
             row = connection.execute("SELECT * FROM x_posts WHERE id = ?", (post_id,)).fetchone()
         if row is None:
             raise ValueError(f"DayPilot X draft {post_id!r} was not found")

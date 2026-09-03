@@ -32,6 +32,22 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./data/daypilot.db"
     daypilot_timezone: str = "Asia/Kolkata"
     daypilot_demo_mode: bool = True
+    public_demo_mode: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("DAYPILOT_PUBLIC_DEMO_MODE", "PUBLIC_DEMO_MODE"),
+    )
+    admin_secret: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("DAYPILOT_ADMIN_SECRET", "ADMIN_SECRET"),
+    )
+    admin_session_ttl_seconds: int = Field(
+        default=28_800,
+        ge=300,
+        le=2_592_000,
+        validation_alias=AliasChoices(
+            "DAYPILOT_ADMIN_SESSION_TTL_SECONDS", "ADMIN_SESSION_TTL_SECONDS"
+        ),
+    )
     provider_mode: ProviderMode = Field(
         default="managed",
         validation_alias=AliasChoices("PROVIDER_MODE", "DAYPILOT_PROVIDER_MODE"),
@@ -127,6 +143,7 @@ class Settings(BaseSettings):
     @field_validator(
         "openai_api_key",
         "tavily_api_key",
+        "admin_secret",
         "langsmith_api_key",
         "google_client_id",
         "google_client_secret",
@@ -147,6 +164,8 @@ class Settings(BaseSettings):
 
     @property
     def database_path(self) -> Path:
+        if self.database_is_postgres:
+            raise ValueError("PostgreSQL DATABASE_URL does not have a local database path")
         explicit = os.getenv("DAYPILOT_DATABASE_PATH")
         if explicit:
             return Path(explicit).expanduser().resolve()
@@ -158,6 +177,14 @@ class Settings(BaseSettings):
         if not path.is_absolute():
             path = PROJECT_ROOT / path
         return path.resolve()
+
+    @property
+    def database_is_postgres(self) -> bool:
+        return self.database_url.startswith(("postgres://", "postgresql://"))
+
+    @property
+    def database_target(self) -> str | Path:
+        return self.database_url if self.database_is_postgres else self.database_path
 
     def resolve_path(self, value: str) -> Path:
         path = Path(value).expanduser()
@@ -203,6 +230,7 @@ class Settings(BaseSettings):
     def mcp_environment(self) -> dict[str, str]:
         """Pass non-token provider configuration to the isolated MCP children."""
         values = {
+            "DATABASE_URL": self.database_url,
             "DAYPILOT_DEMO_MODE": str(self.daypilot_demo_mode).lower(),
             "DAYPILOT_PROVIDER_MODE": self.provider_mode,
             "DAYPILOT_MAIL_PROVIDER": self.configured_provider("mail"),
@@ -246,6 +274,7 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     settings = Settings()
-    settings.database_path.parent.mkdir(parents=True, exist_ok=True)
+    if not settings.database_is_postgres:
+        settings.database_path.parent.mkdir(parents=True, exist_ok=True)
     settings.configure_observability()
     return settings

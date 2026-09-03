@@ -153,7 +153,7 @@ class DeterministicReasoner:
             outcomes.append("create_draft")
             if "mail" not in information:
                 information.append("mail")
-        if "complete" in lowered and "task" in lowered:
+        if re.search(r"\b(?:complete|finish|mark)\b[^.!?]{0,80}\btask\b", lowered):
             outcomes.append("complete_task")
             if "tasks" not in information:
                 information.append("tasks")
@@ -522,8 +522,10 @@ class OpenAIReasoner(DeterministicReasoner):
             )
             if isinstance(response.content, str) and response.content.strip():
                 return response.content.strip()
-        except Exception:
+        except Exception as exc:
             logger.warning("OpenAI general answer failed; using deterministic fallback")
+            if fallback.startswith("This general question needs model-backed reasoning."):
+                return _friendly_openai_failure(exc)
         return fallback
 
     async def select_read_calls(
@@ -827,6 +829,15 @@ def create_reasoner(settings: Settings) -> Reasoner:
     return DeterministicReasoner(settings.daypilot_timezone)
 
 
+def _friendly_openai_failure(exc: Exception) -> str:
+    message = str(exc).lower()
+    if any(token in message for token in ("429", "quota", "billing", "rate limit")):
+        return "OpenAI is configured but currently unavailable because of a quota or billing limit."
+    if "api key" in message or "authentication" in message:
+        return "OpenAI is configured but authentication failed. Check the server configuration."
+    return "OpenAI is configured but unavailable right now. Try again shortly."
+
+
 def _extract_people(request: str) -> list[str]:
     matches = re.findall(r"\b(?:with|to|from)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)", request)
     excluded = {"Tomorrow", "Tonight", "Calendar", "Interview"}
@@ -922,7 +933,7 @@ def _request_requires_write(request: str, intent: UserIntent) -> bool:
     )
     return (
         bool(_infer_requested_operations(request, intent.requested_outcomes))
-        or any(term in lowered for term in write_terms)
+        or bool(re.search(rf"\b(?:{'|'.join(write_terms)})\b", lowered))
         or any(
             outcome.lower().startswith(
                 ("create", "schedule", "draft", "complete", "update", "delete")

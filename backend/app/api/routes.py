@@ -4,11 +4,13 @@ import asyncio
 import json
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Header, Query, Request, status
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi import APIRouter, Header, HTTPException, Query, Request, Response, status
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 
 from backend.app.config import Settings
 from backend.app.domain.models import (
+    AdminLoginRequest,
+    AdminStatusResponse,
     ConnectionCatalog,
     CreateRunRequest,
     DecisionRequest,
@@ -19,6 +21,7 @@ from backend.app.domain.models import (
     HealthResponse,
     OAuthStartResponse,
     PreferenceSet,
+    ReadinessResponse,
     RunAccepted,
     RunDetail,
     RunHistoryClearResponse,
@@ -26,6 +29,8 @@ from backend.app.domain.models import (
 )
 from backend.app.mcp.gateway import MCPGateway
 from backend.app.persistence.repository import DayPilotRepository
+from backend.app.services.access import PUBLIC_PERSONAL_MESSAGE, requires_personal_access
+from backend.app.services.admin_auth import ADMIN_COOKIE_NAME, AdminAuthService
 from backend.app.services.coordinator import TERMINAL_STATUSES, RunCoordinator
 
 router = APIRouter()
@@ -40,33 +45,170 @@ def _services(request: Request) -> tuple[RunCoordinator, DayPilotRepository, MCP
     )
 
 
+def _admin_service(request: Request) -> AdminAuthService | None:
+    return getattr(request.app.state, "admin_auth", None)
+
+
+def _public_mode(request: Request) -> bool:
+    return bool(getattr(request.app.state.settings, "public_demo_mode", False))
+
+
+async def _is_admin(request: Request) -> bool:
+    service = _admin_service(request)
+    if service is None:
+        return not bool(getattr(request.app.state.settings, "public_demo_mode", False))
+    return await service.authenticated(request.cookies.get(ADMIN_COOKIE_NAME))
+
+
+async def _require_admin(request: Request) -> None:
+    if not getattr(request.app.state.settings, "public_demo_mode", False):
+        return
+    if not await _is_admin(request):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=PUBLIC_PERSONAL_MESSAGE)
+    origin = request.headers.get("origin")
+    allowed_origins = getattr(request.app.state.settings, "cors_origins", [])
+    if origin and origin not in allowed_origins:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Request origin is not allowed."
+        )
+
+
+async def _require_run_access(request: Request, run_id: str) -> bool:
+    is_admin = await _is_admin(request)
+    if not getattr(request.app.state.settings, "public_demo_mode", False) or is_admin:
+        return is_admin
+    _, repository, _, _ = _services(request)
+    if await repository.is_run_admin_authorized(run_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=PUBLIC_PERSONAL_MESSAGE)
+    return False
+
+
 @router.get("/health", response_model=HealthResponse)
 async def health(request: Request) -> HealthResponse:
     _, _, _, settings = _services(request)
     return HealthResponse(
         demo_mode=settings.daypilot_demo_mode,
         reasoning_mode=settings.reasoning_mode,
+        runtime_state=getattr(request.app.state, "runtime_state", "starting"),
+    )
+
+
+@router.get("/api/readiness", response_model=ReadinessResponse)
+async def readiness(request: Request) -> ReadinessResponse:
+    snapshot = getattr(request.app.state, "readiness", None)
+    if snapshot is not None:
+        return ReadinessResponse.model_validate(snapshot)
+    gateway = getattr(request.app.state, "gateway", None)
+    total = len(gateway.connections) if gateway is not None else 0
+    return ReadinessResponse(
+        state="starting",
+        mcp_servers_ready=0,
+        mcp_servers_total=total,
+        message="DayPilot is waking up and connecting services.",
+    )
+
+
+@router.post("/api/admin/login", response_model=AdminStatusResponse)
+async def admin_login(payload: AdminLoginRequest, request: Request) -> Response:
+    service = _admin_service(request)
+    if service is None or not getattr(request.app.state.settings, "admin_secret", None):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Admin access is not configured.",
+        )
+    client_key = request.client.host if request.client else "unknown"
+    session = await service.authenticate(payload.access_code, client_key)
+    if session is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid access code.")
+    body = AdminStatusResponse(
+        authenticated=True,
+        public_demo_mode=_public_mode(request),
+        expires_at=session.expires_at,
+        message="Admin mode enabled. Personal services are available.",
+    )
+    response = JSONResponse(body.model_dump(mode="json"))
+    response.set_cookie(value=session.token, **service.cookie_options())
+    return response
+
+
+@router.post("/api/admin/logout", response_model=AdminStatusResponse)
+async def admin_logout(request: Request) -> Response:
+    service = _admin_service(request)
+    token = request.cookies.get(ADMIN_COOKIE_NAME)
+    if service is not None:
+        await service.revoke(token)
+        body = AdminStatusResponse(
+            authenticated=False,
+            public_demo_mode=_public_mode(request),
+            message="Admin mode locked.",
+        )
+        response = JSONResponse(body.model_dump(mode="json"))
+        response.delete_cookie(ADMIN_COOKIE_NAME, path="/")
+        return response
+    return JSONResponse(
+        AdminStatusResponse(
+            authenticated=False,
+            public_demo_mode=False,
+            message="Admin mode locked.",
+        ).model_dump(mode="json")
+    )
+
+
+@router.get("/api/admin/status", response_model=AdminStatusResponse)
+async def admin_status(request: Request) -> AdminStatusResponse:
+    authenticated = await _is_admin(request)
+    service = _admin_service(request)
+    return AdminStatusResponse(
+        authenticated=authenticated,
+        public_demo_mode=_public_mode(request),
+        expires_at=(await service.expiry(request.cookies.get(ADMIN_COOKIE_NAME)))
+        if service
+        else None,
+        message=(
+            "Admin mode enabled. Personal services are available."
+            if authenticated
+            else "Public demo mode. Personal services are disabled."
+        ),
     )
 
 
 @router.post("/api/runs", response_model=RunAccepted, status_code=status.HTTP_202_ACCEPTED)
 async def create_run(payload: CreateRunRequest, request: Request) -> RunAccepted:
     coordinator, _, _, _ = _services(request)
-    return await coordinator.start_run(payload.request)
+    if getattr(request.app.state, "runtime_state", "starting") == "starting":
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="DayPilot is still waking up and connecting services. Try again shortly.",
+        )
+    admin_authorized = await _is_admin(request)
+    if (
+        _public_mode(request)
+        and not request.app.state.settings.daypilot_demo_mode
+        and not admin_authorized
+        and requires_personal_access(payload.request)
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=PUBLIC_PERSONAL_MESSAGE)
+    if _public_mode(request) and admin_authorized:
+        await _require_admin(request)
+    return await coordinator.start_run(payload.request, admin_authorized=admin_authorized)
 
 
 @router.post("/api/demo-workspace/reset", response_model=DemoResetResponse)
 async def reset_demo_workspace(request: Request) -> DemoResetResponse:
+    await _require_admin(request)
     return await request.app.state.demo_workspace.reset_demo_workspace()
 
 
 @router.get("/api/connections", response_model=ConnectionCatalog)
 async def list_connections(request: Request) -> ConnectionCatalog:
+    if _public_mode(request) and not await _is_admin(request):
+        return request.app.state.connections.public_catalog()
     return request.app.state.connections.catalog()
 
 
 @router.post("/api/connections/google/start", response_model=OAuthStartResponse)
 async def start_google_connection(request: Request) -> OAuthStartResponse:
+    await _require_admin(request)
     return request.app.state.connections.start_google()
 
 
@@ -79,6 +221,7 @@ async def google_callback(
 ) -> RedirectResponse:
     settings = request.app.state.settings
     try:
+        await _require_admin(request)
         await request.app.state.connections.complete_google(code, state, error)
         return RedirectResponse(f"{settings.site_url}/?connection=google_connected")
     except Exception as exc:
@@ -89,12 +232,14 @@ async def google_callback(
 
 @router.post("/api/connections/google/disconnect", response_model=ConnectionCatalog)
 async def disconnect_google(request: Request) -> ConnectionCatalog:
+    await _require_admin(request)
     await request.app.state.connections.disconnect_google()
     return request.app.state.connections.catalog()
 
 
 @router.post("/api/connections/x/start", response_model=OAuthStartResponse)
 async def start_x_connection(request: Request) -> OAuthStartResponse:
+    await _require_admin(request)
     return request.app.state.connections.start_x()
 
 
@@ -107,6 +252,7 @@ async def x_callback(
 ) -> RedirectResponse:
     settings = request.app.state.settings
     try:
+        await _require_admin(request)
         await request.app.state.connections.complete_x(code, state, error)
         return RedirectResponse(f"{settings.site_url}/?connection=x_connected")
     except Exception as exc:
@@ -128,6 +274,7 @@ async def managed_connection_callback(
     provider_name = provider or ""
     account_id = connected_account_id or connectedAccountId
     try:
+        await _require_admin(request)
         await request.app.state.connections.complete_managed(
             provider_name,
             status,
@@ -144,27 +291,33 @@ async def managed_connection_callback(
 
 @router.post("/api/connections/x/disconnect", response_model=ConnectionCatalog)
 async def disconnect_x(request: Request) -> ConnectionCatalog:
+    await _require_admin(request)
     await request.app.state.connections.disconnect_x()
     return request.app.state.connections.catalog()
 
 
 @router.get("/api/connections/files/roots", response_model=list[FileRoot])
 async def list_file_roots(request: Request) -> list[FileRoot]:
+    if _public_mode(request) and not await _is_admin(request):
+        return []
     return await request.app.state.connections.list_file_roots()
 
 
 @router.post("/api/connections/files/roots", response_model=FileRoot)
 async def add_file_root(payload: FileRootRequest, request: Request) -> FileRoot:
+    await _require_admin(request)
     return await request.app.state.connections.add_file_root(payload.path)
 
 
 @router.delete("/api/connections/files/roots/{root_id}", status_code=204)
 async def remove_file_root(root_id: str, request: Request) -> None:
+    await _require_admin(request)
     await request.app.state.connections.remove_file_root(root_id)
 
 
 @router.post("/api/run-history/clear", response_model=RunHistoryClearResponse)
 async def clear_run_history(request: Request) -> RunHistoryClearResponse:
+    await _require_admin(request)
     return await request.app.state.demo_workspace.clear_run_history()
 
 
@@ -174,12 +327,15 @@ async def list_runs(
     limit: Annotated[int, Query(ge=1, le=100)] = 25,
 ) -> list[RunRecord]:
     _, repository, _, _ = _services(request)
+    if _public_mode(request) and not await _is_admin(request):
+        return await repository.list_public_runs(limit)
     return await repository.list_runs(limit)
 
 
 @router.get("/api/runs/{run_id}", response_model=RunDetail)
 async def get_run(run_id: str, request: Request) -> RunDetail:
     coordinator, _, _, _ = _services(request)
+    await _require_run_access(request, run_id)
     return await coordinator.get_detail(run_id)
 
 
@@ -190,6 +346,7 @@ async def approve_run(
     request: Request,
 ) -> RunAccepted:
     coordinator, _, _, _ = _services(request)
+    await _require_admin(request)
     return await coordinator.resume(run_id, "approve", payload.feedback)
 
 
@@ -200,6 +357,7 @@ async def reject_run(
     request: Request,
 ) -> RunAccepted:
     coordinator, _, _, _ = _services(request)
+    await _require_admin(request)
     return await coordinator.resume(run_id, "reject", payload.feedback)
 
 
@@ -210,15 +368,25 @@ async def edit_plan(
     request: Request,
 ) -> RunDetail:
     coordinator, _, _, _ = _services(request)
+    await _require_admin(request)
     return await coordinator.revise(run_id, payload.feedback, payload.plan_revision)
 
 
 @router.get("/api/tools")
 async def list_tools(request: Request) -> dict[str, Any]:
     _, _, gateway, _ = _services(request)
-    tools = await gateway.discover(force=not bool(gateway.catalog()))
+    admin_authorized = await _is_admin(request)
+    if getattr(request.app.state, "runtime_state", "starting") == "starting":
+        return {
+            "servers": gateway.catalog(admin_authorized=admin_authorized),
+            "tools": [],
+        }
+    tools = await gateway.discover(
+        force=not bool(gateway.catalog(admin_authorized=admin_authorized)),
+        admin_authorized=admin_authorized,
+    )
     return {
-        "servers": gateway.catalog(),
+        "servers": gateway.catalog(admin_authorized=admin_authorized),
         "tools": [tool.model_dump(mode="json") for tool in tools],
     }
 
@@ -226,6 +394,8 @@ async def list_tools(request: Request) -> dict[str, Any]:
 @router.get("/api/preferences", response_model=PreferenceSet)
 async def get_preferences(request: Request) -> PreferenceSet:
     _, repository, _, _ = _services(request)
+    if _public_mode(request) and not await _is_admin(request):
+        return PreferenceSet()
     return await repository.get_preferences()
 
 
@@ -235,13 +405,16 @@ async def update_preferences(
     request: Request,
 ) -> PreferenceSet:
     _, repository, _, _ = _services(request)
+    await _require_admin(request)
     return await repository.update_preferences(preferences)
 
 
 def _quote_error(error: Exception) -> str:
     from urllib.parse import quote
 
-    return quote(str(error)[:240], safe="")
+    # OAuth/provider exceptions can contain identifiers or upstream response
+    # details. Keep those server-side and return one stable product message.
+    return quote("The connection could not be completed. Try again.", safe="")
 
 
 @router.get("/api/runs/{run_id}/events")
@@ -252,6 +425,7 @@ async def stream_events(
     after: Annotated[int, Query(ge=0)] = 0,
 ) -> StreamingResponse:
     _, repository, _, _ = _services(request)
+    await _require_run_access(request, run_id)
     cursor = max(after, int(last_event_id or 0))
 
     async def event_stream():

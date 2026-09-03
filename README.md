@@ -88,11 +88,11 @@ flowchart TB
     Web --> Tavily[Tavily Search API]
 
     subgraph persistence[Durable state]
-        SQLite[(SQLite repository)]
+        Database[(SQLite locally / PostgreSQL in production)]
         Checkpoints[LangGraph checkpoints]
         Ledger[Execution ledger + receipts]
     end
-    Graph <--> SQLite
+    Graph <--> Database
     Graph <--> Checkpoints
     Execute --> Ledger
     Verify --> Ledger
@@ -220,7 +220,7 @@ provider writes are never part of automated evaluation.
 - **Backend:** FastAPI, Python, Pydantic, Uvicorn
 - **Agent:** LangGraph, LangChain, OpenAI structured reasoning
 - **Integration:** MCP, `langchain-mcp-adapters`, Composio managed sessions, Tavily web search
-- **Persistence:** SQLite, `aiosqlite`, LangGraph SQLite checkpoints
+- **Persistence:** SQLite locally or PostgreSQL in production, LangGraph SQLite/PostgreSQL checkpoints
 - **Quality:** Pytest, Ruff, ESLint, TypeScript, deterministic evaluations
 
 ## Run locally
@@ -253,6 +253,10 @@ DAYPILOT_DEMO_MODE=true
 DAYPILOT_PROVIDER_MODE=managed
 DAYPILOT_TIMEZONE=Asia/Kolkata
 DATABASE_URL=sqlite:///./data/daypilot.db
+DAYPILOT_PUBLIC_DEMO_MODE=false
+DAYPILOT_ADMIN_SECRET=
+DAYPILOT_ADMIN_SESSION_TTL_SECONDS=28800
+CORS_ORIGINS=["http://localhost:3000","http://127.0.0.1:3000"]
 OPENAI_API_KEY=
 COMPOSIO_API_KEY=
 TAVILY_API_KEY=
@@ -267,6 +271,16 @@ fresh public web research; without it DayPilot reports that search is unavailabl
 instead of fabricating fresh information. Never put provider secrets in
 `NEXT_PUBLIC_*` variables.
 
+For a public deployment, set `DAYPILOT_PUBLIC_DEMO_MODE=true`, provide a strong
+`DAYPILOT_ADMIN_SECRET`, use a hosted `postgresql://` `DATABASE_URL`, and include
+the Cloudflare origin in `CORS_ORIGINS`. The public demo exposes only general/web
+capabilities; the owner unlocks connected services from Preferences.
+
+The first boot against PostgreSQL creates the application and LangGraph checkpoint
+tables automatically. Existing SQLite data is not copied implicitly; preserve any
+current production history and pending approvals with a one-time database migration
+before switching Render's `DATABASE_URL`.
+
 ## Project structure
 
 ```text
@@ -277,7 +291,7 @@ backend/
     providers/      Managed, direct, and local adapters
     services/       Planner, reasoner, coordinator, receipts
     domain/         Typed models and errors
-    persistence/    SQLite repository
+    persistence/    dual-dialect application repository
   tests/            Workflow, safety, provider, and dependency regressions
 frontend/
   src/components/  Operations workspace and graph UI
@@ -324,6 +338,10 @@ cd frontend && npm test -- --run
 - This is a portfolio-grade local operations system, not a multi-tenant SaaS.
 - Demo mode is fully seeded and deterministic; connected mode requires the
   user's own provider authorization.
+- Public demo mode disables personal services for anonymous visitors; admin
+  access uses a short-lived HttpOnly session and does not bypass HITL approval.
+- Production application state and LangGraph checkpoints can use hosted
+  PostgreSQL via `DATABASE_URL`; local SQLite remains supported for demos.
 - Local Files is read-only and requires explicit folder allowlisting.
 - Google Tasks stores due dates; exact due times are not preserved by the
   provider API.
