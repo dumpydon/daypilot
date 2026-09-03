@@ -517,11 +517,17 @@ class _FakeSession:
 
 
 class _FakeSessions:
+    def __init__(self):
+        self.create_count = 0
+        self.use_count = 0
+
     def create(self, **kwargs):
+        self.create_count += 1
         self.created = kwargs
         return _FakeSession()
 
     def use(self, session_id: str, *, mcp: bool):
+        self.use_count += 1
         assert session_id == "session-managed"
         assert mcp is True
         return _FakeSession()
@@ -601,6 +607,36 @@ def test_managed_composio_session_is_curated_and_auth_is_server_side(tmp_path: P
     assert fake.sessions.created["connected_accounts"] == {GOOGLE_TOOLKIT: ["ca-managed"]}
     client.disconnect(GOOGLE_TOOLKIT)
     assert state.account(GOOGLE_TOOLKIT) is None
+
+
+def test_managed_composio_reuses_session_and_tool_catalog(tmp_path: Path) -> None:
+    class CountingMCPClient(_FakeMCPClient):
+        calls = 0
+
+        async def get_tools(self, *, server_name: str):
+            type(self).calls += 1
+            return await super().get_tools(server_name=server_name)
+
+    settings = settings_for(tmp_path, composio_api_key="composio-secret")
+    state = ManagedStateStore(settings.database_path)
+    state.set_session(GOOGLE_TOOLKIT, "session-managed", "daypilot-test")
+    client = ComposioManagedClient(
+        settings,
+        state=state,
+        composio_factory=_FakeComposio,
+        mcp_client_factory=CountingMCPClient,
+    )
+
+    assert client.execute(GOOGLE_TOOLKIT, "GOOGLESUPER_FETCH_EMAILS", {"query": "first"}) == {
+        "messages": []
+    }
+    assert client.execute(GOOGLE_TOOLKIT, "GOOGLESUPER_FETCH_EMAILS", {"query": "second"}) == {
+        "messages": []
+    }
+
+    fake = client._client_instance
+    assert fake.sessions.use_count == 1
+    assert CountingMCPClient.calls == 1
 
 
 def test_managed_sessions_have_independent_toolkit_failure_boundaries(

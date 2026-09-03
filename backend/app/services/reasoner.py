@@ -31,6 +31,7 @@ from backend.app.services.planner import (
     _requires_grounded_temporal_anchor,
 )
 from backend.app.services.summarizer import summarize_read_only
+from backend.app.timing import timed
 
 logger = logging.getLogger(__name__)
 
@@ -437,8 +438,10 @@ class OpenAIReasoner(DeterministicReasoner):
         self.model = model or ChatOpenAI(
             model=settings.openai_model,
             api_key=settings.openai_api_key,
-            max_retries=1,
-            timeout=25,
+            # A failed optional reasoning call has a deterministic fallback;
+            # retrying it here doubles the user-visible request latency.
+            max_retries=0,
+            timeout=20,
         )
         self.selection_model = (
             self.model.model_copy(update={"reasoning_effort": "none"})
@@ -448,6 +451,11 @@ class OpenAIReasoner(DeterministicReasoner):
 
     async def understand(self, request: str) -> UserIntent:
         baseline = await super().understand(request)
+        # The deterministic boundary already recognizes stable, tool-free
+        # questions.  Skip a second model round-trip for that path; the answer
+        # stage still uses the configured model for the actual response.
+        if baseline.request_kind == "general":
+            return baseline
         structured = self.model.with_structured_output(UserIntent, method="json_schema")
         prompt = (
             "You are the request-understanding stage of DayPilot. Extract only the user's stated "
@@ -465,7 +473,8 @@ class OpenAIReasoner(DeterministicReasoner):
             f"Request: {request}"
         )
         try:
-            result = UserIntent.model_validate(await structured.ainvoke(prompt))
+            with timed("openai.understand"):
+                result = UserIntent.model_validate(await structured.ainvoke(prompt))
             operations = list(
                 dict.fromkeys([*result.requested_operations, *baseline.requested_operations])
             )
@@ -516,10 +525,11 @@ class OpenAIReasoner(DeterministicReasoner):
             f"Request: {request}"
         )
         try:
-            response = await self.model.ainvoke(
-                prompt,
-                config={"run_name": "general_answer"},
-            )
+            with timed("openai.general_answer"):
+                response = await self.model.ainvoke(
+                    prompt,
+                    config={"run_name": "general_answer"},
+                )
             if isinstance(response.content, str) and response.content.strip():
                 return response.content.strip()
         except Exception as exc:
@@ -560,7 +570,8 @@ class OpenAIReasoner(DeterministicReasoner):
             f"Read tools: {json.dumps([tool.model_dump(mode='json') for tool in safe_tools])}"
         )
         try:
-            result = ReadCallPlan.model_validate(await structured.ainvoke(prompt))
+            with timed("openai.read_selection"):
+                result = ReadCallPlan.model_validate(await structured.ainvoke(prompt))
             safe_names = {tool.name for tool in safe_tools}
             calls = [call for call in result.calls if call.tool_name in safe_names][:6]
             if calls:
@@ -594,10 +605,11 @@ class OpenAIReasoner(DeterministicReasoner):
             f"Tool errors:\n{json.dumps(errors, ensure_ascii=False)}"
         )
         try:
-            response = await self.model.ainvoke(
-                prompt,
-                config={"run_name": "grounded_read_summary"},
-            )
+            with timed("openai.grounded_summary"):
+                response = await self.model.ainvoke(
+                    prompt,
+                    config={"run_name": "grounded_read_summary"},
+                )
             content = response.content
             if isinstance(content, str) and content.strip():
                 return content.strip()
@@ -731,9 +743,10 @@ class OpenAIReasoner(DeterministicReasoner):
                     "grounded context, and user-provided arguments."
                 )
             try:
-                proposal = PlanningProposal.model_validate(
-                    await structured.ainvoke(call_prompt, config={"run_name": run_name})
-                )
+                with timed("openai.plan_proposal"):
+                    proposal = PlanningProposal.model_validate(
+                        await structured.ainvoke(call_prompt, config={"run_name": run_name})
+                    )
             except Exception as exc:
                 phase = "revision" if feedback else "initial plan"
                 raise InvalidPlanError(f"OpenAI {phase} failed: {exc}") from exc

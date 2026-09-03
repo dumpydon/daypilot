@@ -16,6 +16,8 @@ from typing import Any
 
 import aiosqlite
 
+from backend.app.timing import timed
+
 try:  # psycopg is optional for local installs that only use SQLite.
     import psycopg
     from psycopg.rows import dict_row
@@ -84,8 +86,9 @@ def _statements(script: str) -> list[str]:
 
 
 class SyncCursor:
-    def __init__(self, cursor: Any) -> None:
+    def __init__(self, cursor: Any, *, postgres: bool = False) -> None:
         self._cursor = cursor
+        self._postgres = postgres
 
     @property
     def rowcount(self) -> int:
@@ -97,10 +100,12 @@ class SyncCursor:
         return int(value) if value is not None else None
 
     def fetchone(self) -> Any:
-        return self._cursor.fetchone()
+        with timed("postgres.fetchone" if self._postgres else "sqlite.fetchone"):
+            return self._cursor.fetchone()
 
     def fetchall(self) -> list[Any]:
-        return list(self._cursor.fetchall())
+        with timed("postgres.fetchall" if self._postgres else "sqlite.fetchall"):
+            return list(self._cursor.fetchall())
 
     def __iter__(self):
         return iter(self._cursor)
@@ -112,11 +117,11 @@ class SyncConnection:
         self.postgres = postgres
 
     def execute(self, query: str, parameters: Any = ()) -> SyncCursor:
-        return SyncCursor(
-            self._connection.execute(
+        with timed("postgres.execute" if self.postgres else "sqlite.execute"):
+            cursor = self._connection.execute(
                 _adapt_sql(query, parameters, postgres=self.postgres), parameters
             )
-        )
+        return SyncCursor(cursor, postgres=self.postgres)
 
     def executemany(
         self,
@@ -126,8 +131,9 @@ class SyncConnection:
         adapted = _adapt_sql(query, None, postgres=self.postgres)
         cursor = self._connection.cursor()
         try:
-            cursor.executemany(adapted, parameters)
-            return SyncCursor(cursor)
+            with timed("postgres.executemany" if self.postgres else "sqlite.executemany"):
+                cursor.executemany(adapted, parameters)
+            return SyncCursor(cursor, postgres=self.postgres)
         finally:
             cursor.close()
 
@@ -138,10 +144,12 @@ class SyncConnection:
             self.execute(statement)
 
     def commit(self) -> None:
-        self._connection.commit()
+        with timed("postgres.commit" if self.postgres else "sqlite.commit"):
+            self._connection.commit()
 
     def rollback(self) -> None:
-        self._connection.rollback()
+        with timed("postgres.rollback" if self.postgres else "sqlite.rollback"):
+            self._connection.rollback()
 
     def close(self) -> None:
         self._connection.close()
@@ -163,7 +171,8 @@ class SyncConnection:
 def connect_sync(target: DatabaseTarget):
     if is_postgres_target(target):
         driver = _require_psycopg()
-        connection = driver.connect(str(target), row_factory=dict_row)
+        with timed("postgres.connect"):
+            connection = driver.connect(str(target), row_factory=dict_row)
         try:
             yield SyncConnection(connection, postgres=True)
             connection.commit()
@@ -175,7 +184,8 @@ def connect_sync(target: DatabaseTarget):
         return
     path = sqlite_path(target)
     path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(path, timeout=10)
+    with timed("sqlite.connect"):
+        connection = sqlite3.connect(path, timeout=10)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA journal_mode=WAL")
     connection.execute("PRAGMA foreign_keys=ON")
@@ -190,8 +200,9 @@ def connect_sync(target: DatabaseTarget):
 
 
 class AsyncCursor:
-    def __init__(self, cursor: Any) -> None:
+    def __init__(self, cursor: Any, *, postgres: bool = False) -> None:
         self._cursor = cursor
+        self._postgres = postgres
 
     @property
     def rowcount(self) -> int:
@@ -203,10 +214,12 @@ class AsyncCursor:
         return int(value) if value is not None else None
 
     async def fetchone(self) -> Any:
-        return await self._cursor.fetchone()
+        with timed("postgres.fetchone" if self._postgres else "sqlite.fetchone"):
+            return await self._cursor.fetchone()
 
     async def fetchall(self) -> list[Any]:
-        return list(await self._cursor.fetchall())
+        with timed("postgres.fetchall" if self._postgres else "sqlite.fetchall"):
+            return list(await self._cursor.fetchall())
 
 
 class AsyncConnection:
@@ -215,10 +228,11 @@ class AsyncConnection:
         self.postgres = postgres
 
     async def execute(self, query: str, parameters: Any = ()) -> AsyncCursor:
-        cursor = await self._connection.execute(
-            _adapt_sql(query, parameters, postgres=self.postgres), parameters
-        )
-        return AsyncCursor(cursor)
+        with timed("postgres.execute" if self.postgres else "sqlite.execute"):
+            cursor = await self._connection.execute(
+                _adapt_sql(query, parameters, postgres=self.postgres), parameters
+            )
+        return AsyncCursor(cursor, postgres=self.postgres)
 
     async def executemany(
         self,
@@ -227,7 +241,8 @@ class AsyncConnection:
     ) -> None:
         adapted = _adapt_sql(query, None, postgres=self.postgres)
         async with self._connection.cursor() as cursor:
-            await cursor.executemany(adapted, parameters)
+            with timed("postgres.executemany" if self.postgres else "sqlite.executemany"):
+                await cursor.executemany(adapted, parameters)
 
     async def executescript(self, script: str) -> None:
         for statement in _statements(script):
@@ -236,10 +251,12 @@ class AsyncConnection:
             await self.execute(statement)
 
     async def commit(self) -> None:
-        await self._connection.commit()
+        with timed("postgres.commit" if self.postgres else "sqlite.commit"):
+            await self._connection.commit()
 
     async def rollback(self) -> None:
-        await self._connection.rollback()
+        with timed("postgres.rollback" if self.postgres else "sqlite.rollback"):
+            await self._connection.rollback()
 
     async def close(self) -> None:
         await self._connection.close()
@@ -249,7 +266,8 @@ class AsyncConnection:
 async def connect_async(target: DatabaseTarget):
     if is_postgres_target(target):
         driver = _require_psycopg()
-        connection = await driver.AsyncConnection.connect(str(target), row_factory=dict_row)
+        with timed("postgres.connect"):
+            connection = await driver.AsyncConnection.connect(str(target), row_factory=dict_row)
         try:
             yield AsyncConnection(connection, postgres=True)
         finally:
@@ -257,7 +275,8 @@ async def connect_async(target: DatabaseTarget):
         return
     path = sqlite_path(target)
     path.parent.mkdir(parents=True, exist_ok=True)
-    connection = await aiosqlite.connect(path)
+    with timed("sqlite.connect"):
+        connection = await aiosqlite.connect(path)
     connection.row_factory = aiosqlite.Row
     await connection.execute("PRAGMA journal_mode=WAL")
     await connection.execute("PRAGMA foreign_keys=ON")

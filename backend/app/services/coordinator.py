@@ -23,6 +23,7 @@ from backend.app.graph.state import DayPilotState
 from backend.app.mcp.gateway import MCPGateway
 from backend.app.persistence.repository import DayPilotRepository
 from backend.app.services.receipts import build_resource_receipts
+from backend.app.timing import timed
 
 TERMINAL_STATUSES = {RunStatus.COMPLETED, RunStatus.REJECTED, RunStatus.FAILED}
 SETTLED_STATUSES = {*TERMINAL_STATUSES, RunStatus.WAITING_APPROVAL}
@@ -47,20 +48,21 @@ class RunCoordinator:
     ) -> RunAccepted:
         run_id = f"run-{uuid4().hex[:12]}"
         thread_id = f"thread-{uuid4().hex}"
-        await self.repository.create_run(
-            run_id,
-            thread_id,
-            user_request,
-            admin_authorized=admin_authorized,
-        )
-        await self.repository.append_event(
-            run_id,
-            "request_received",
-            EventState.COMPLETED,
-            "Request received",
-            user_request,
-        )
-        preferences = await self.repository.get_preferences()
+        with timed("backend.request_accepted"):
+            await self.repository.create_run(
+                run_id,
+                thread_id,
+                user_request,
+                admin_authorized=admin_authorized,
+            )
+            await self.repository.append_event(
+                run_id,
+                "request_received",
+                EventState.COMPLETED,
+                "Request received",
+                user_request,
+            )
+            preferences = await self.repository.get_preferences()
         now = datetime.now(UTC).isoformat()
         state: DayPilotState = {
             "run_id": run_id,
@@ -101,7 +103,8 @@ class RunCoordinator:
 
     async def get_detail(self, run_id: str) -> RunDetail:
         run = await self.repository.get_run(run_id)
-        snapshot = await self.graph.aget_state(self._config(run.thread_id))
+        with timed("langgraph.checkpoint_read"):
+            snapshot = await self.graph.aget_state(self._config(run.thread_id))
         values = dict(snapshot.values) if snapshot and snapshot.values else {}
         events = await self.repository.list_events(run_id)
         interrupts = getattr(snapshot, "interrupts", ()) if snapshot else ()
@@ -157,10 +160,11 @@ class RunCoordinator:
             await self.repository.claim_resume(run_id)
             try:
                 async with asyncio.timeout(REVISION_TIMEOUT_SECONDS):
-                    await self.graph.ainvoke(
-                        Command(resume={"decision": "edit", "feedback": feedback}),
-                        config=self._config(current.thread_id),
-                    )
+                    with timed("langgraph.revision_invoke"):
+                        await self.graph.ainvoke(
+                            Command(resume={"decision": "edit", "feedback": feedback}),
+                            config=self._config(current.thread_id),
+                        )
             except TimeoutError as exc:
                 message = f"Plan revision timed out after {REVISION_TIMEOUT_SECONDS} seconds"
                 await self._record_failure(run_id, PlanRevisionError(message))
@@ -211,7 +215,8 @@ class RunCoordinator:
     ) -> None:
         await self.repository.set_running(run_id)
         try:
-            await self.graph.ainvoke(state, config=self._config(thread_id))
+            with timed("langgraph.initial_invoke"):
+                await self.graph.ainvoke(state, config=self._config(thread_id))
         except Exception as exc:
             await self._record_failure(run_id, exc)
 
@@ -223,10 +228,11 @@ class RunCoordinator:
         feedback: str | None,
     ) -> None:
         try:
-            await self.graph.ainvoke(
-                Command(resume={"decision": decision, "feedback": feedback}),
-                config=self._config(thread_id),
-            )
+            with timed("langgraph.resume_invoke"):
+                await self.graph.ainvoke(
+                    Command(resume={"decision": decision, "feedback": feedback}),
+                    config=self._config(thread_id),
+                )
         except Exception as exc:
             await self._record_failure(run_id, exc)
 

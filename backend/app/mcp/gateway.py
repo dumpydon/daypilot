@@ -4,7 +4,9 @@ import asyncio
 import logging
 import os
 import sys
+from copy import deepcopy
 from pathlib import Path
+from time import monotonic
 from typing import Any
 from uuid import uuid4
 
@@ -21,8 +23,10 @@ from backend.app.mcp.policy import (
     get_policy,
 )
 from backend.app.providers.manager import ConnectionManager
+from backend.app.timing import timed
 
 logger = logging.getLogger(__name__)
+CATALOG_CACHE_TTL_SECONDS = 2.0
 
 
 class MCPGateway:
@@ -36,7 +40,11 @@ class MCPGateway:
         self._tools: dict[str, BaseTool] = {}
         self._metadata: dict[str, ToolMetadata] = {}
         self._server_status: dict[str, dict[str, Any]] = {}
+        self._catalog_cache: dict[bool, tuple[float, list[dict[str, Any]]]] = {}
+        # Keep the raw flag for diagnostics/backwards compatibility; cache
+        # decisions use the effective visibility scope below.
         self._discovery_admin_authorized: bool | None = None
+        self._discovery_full_access: bool | None = None
         self._discovery_lock = asyncio.Lock()
         project_root = Path(__file__).resolve().parents[3]
         # Keep provider secrets/configuration explicit, but retain the standard
@@ -78,11 +86,12 @@ class MCPGateway:
         force: bool = False,
         admin_authorized: bool = False,
     ) -> list[ToolMetadata]:
-        async with self._discovery_lock:
-            return await self._discover_locked(
-                force=force,
-                admin_authorized=admin_authorized,
-            )
+        with timed("mcp.discovery"):
+            async with self._discovery_lock:
+                return await self._discover_locked(
+                    force=force,
+                    admin_authorized=admin_authorized,
+                )
 
     async def _discover_locked(
         self,
@@ -90,12 +99,15 @@ class MCPGateway:
         force: bool,
         admin_authorized: bool,
     ) -> list[ToolMetadata]:
-        if self._metadata and not force and self._discovery_admin_authorized == admin_authorized:
+        discovery_scope = not self._is_public_restricted(admin_authorized)
+        if self._metadata and not force and self._discovery_full_access == discovery_scope:
             return list(self._metadata.values())
         self._tools.clear()
         self._metadata.clear()
         self._server_status.clear()
+        self._catalog_cache.clear()
         self._discovery_admin_authorized = admin_authorized
+        self._discovery_full_access = discovery_scope
         server_names = self._visible_server_names(admin_authorized)
         for server_name in self.connections:
             if server_name not in server_names:
@@ -108,7 +120,8 @@ class MCPGateway:
                 }
                 continue
             try:
-                tools = await self.client.get_tools(server_name=server_name)
+                with timed(f"mcp.discovery.{server_name}"):
+                    tools = await self.client.get_tools(server_name=server_name)
                 for tool in tools:
                     policy = get_policy(tool.name, server_name)
                     metadata = ToolMetadata(
@@ -141,6 +154,9 @@ class MCPGateway:
                     "tools": [],
                     "error": f"{server_name.title()} capability could not initialize.",
                 }
+        # A catalog request may have raced the sequential discovery loop;
+        # discard any partial status snapshot before exposing the completed one.
+        self._catalog_cache.clear()
         return list(self._metadata.values())
 
     async def invoke(
@@ -151,10 +167,11 @@ class MCPGateway:
         authorization: WriteAuthorization | None = None,
         admin_authorized: bool = False,
     ) -> Any:
+        discovery_scope = not self._is_public_restricted(admin_authorized)
         async with self._discovery_lock:
             if not self._tools or (
-                self._discovery_admin_authorized is not None
-                and self._discovery_admin_authorized != admin_authorized
+                self._discovery_full_access is not None
+                and self._discovery_full_access != discovery_scope
             ):
                 await self._discover_locked(
                     force=bool(self._tools),
@@ -170,17 +187,39 @@ class MCPGateway:
             )
         policy = get_policy(tool_name, metadata.server_name)
         enforce_tool_policy(tool_name, arguments, policy, authorization)
-        result = await tool.ainvoke(
-            {
-                "type": "tool_call",
-                "id": f"mcp-{uuid4().hex}",
-                "name": tool_name,
-                "args": arguments,
-            }
-        )
+        stage = {
+            "search_mail": "mcp.search_mail",
+            "get_thread": "mcp.get_thread",
+        }.get(tool_name, "mcp.tool_invoke")
+        with timed(stage):
+            result = await tool.ainvoke(
+                {
+                    "type": "tool_call",
+                    "id": f"mcp-{uuid4().hex}",
+                    "name": tool_name,
+                    "args": arguments,
+                }
+            )
         return self._structured_result(result)
 
     def catalog(self, *, admin_authorized: bool = False) -> list[dict[str, Any]]:
+        cache_scope = not self._is_public_restricted(admin_authorized)
+        cached = self._catalog_cache.get(cache_scope)
+        if cached is not None:
+            cached_at, cached_catalog = cached
+            if monotonic() - cached_at < CATALOG_CACHE_TTL_SECONDS:
+                return deepcopy(cached_catalog)
+            self._catalog_cache.pop(cache_scope, None)
+        with timed("mcp.catalog"):
+            result = self._build_catalog(admin_authorized=admin_authorized)
+        self._catalog_cache[cache_scope] = (monotonic(), deepcopy(result))
+        return result
+
+    def invalidate_catalog(self) -> None:
+        """Drop provider-status snapshots after an explicit connection change."""
+        self._catalog_cache.clear()
+
+    def _build_catalog(self, *, admin_authorized: bool) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
         for server_name, status in self._server_status.items():
             if self._is_public_restricted(admin_authorized) and server_name != "web":

@@ -1,6 +1,8 @@
 import { Cable, Menu } from "lucide-react";
+import Link from "next/link";
 
 import type { MCPServer } from "@/lib/types";
+import { endTiming, startTiming } from "@/lib/timing";
 
 import { DayPilotLogo } from "./DayPilotLogo";
 import styles from "./workspace.module.css";
@@ -9,6 +11,7 @@ interface HeaderProps {
   servers: MCPServer[];
   reasoningMode: string;
   onMenu: () => void;
+  onHome?: () => void;
   active?: boolean;
   readinessState?: "starting" | "ready" | "degraded";
   publicDemoMode?: boolean;
@@ -19,6 +22,7 @@ export function Header({
   servers,
   reasoningMode,
   onMenu,
+  onHome,
   active = false,
   readinessState = "ready",
   publicDemoMode = false,
@@ -42,16 +46,35 @@ export function Header({
       <button className={styles.mobileMenu} onClick={onMenu} aria-label="Open navigation">
         <Menu size={17} />
       </button>
-      {/* Home and run detail share `/`; document navigation clears only the local view,
-          including in-flight view updates, while persisted runs continue on the server. */}
-      {/* eslint-disable-next-line @next/next/no-html-link-for-pages */}
-      <a className={styles.brand} href="/" aria-label="DayPilot home">
+      <Link
+        className={styles.brand}
+        href="/"
+        aria-label="DayPilot home"
+        onClick={(event) => {
+          // Home and run detail share `/`. Keep the warm workspace mounted and
+          // clear only the local view when the link is clicked in place.
+          if (
+            onHome
+            && typeof window !== "undefined"
+            && window.location.pathname === "/"
+            && !event.metaKey
+            && !event.ctrlKey
+            && !event.shiftKey
+            && !event.altKey
+          ) {
+            event.preventDefault();
+            const navigationTiming = startTiming("home-navigation");
+            onHome();
+            endTiming("home-navigation", navigationTiming);
+          }
+        }}
+      >
         <DayPilotLogo className={styles.mark} active={active} aria-label="DayPilot logo" />
         <div>
           <strong>DayPilot</strong>
           <span>MCP-powered personal operations</span>
         </div>
-      </a>
+      </Link>
       <div className={styles.runtime}>
         <span className={styles.demoBadge}>
           {waking

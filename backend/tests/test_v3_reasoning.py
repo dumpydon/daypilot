@@ -10,6 +10,11 @@ from backend.app.services.summarizer import summarize_read_only
 from backend.app.services.web_research import WebResearchService
 
 
+class _NoUnderstandingModel:
+    def with_structured_output(self, *_args, **_kwargs):
+        raise AssertionError("general requests should not call the understanding model")
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("prompt", "expected"),
@@ -30,6 +35,19 @@ async def test_general_answers_skip_mcp_and_planning(harness, prompt: str, expec
     assert not any(detail.context.values())
     assert not any(event.event_type == "tools_discovered" for event in detail.events)
     assert await harness.repository.list_executions(accepted.id) == []
+
+
+@pytest.mark.asyncio
+async def test_openai_reasoner_skips_understanding_round_trip_for_clear_general_request() -> None:
+    reasoner = OpenAIReasoner(
+        Settings(_env_file=None, openai_api_key="configured"),
+        model=_NoUnderstandingModel(),
+    )
+
+    intent = await reasoner.understand("What is the capital of Romania?")
+
+    assert intent.request_kind == "general"
+    assert intent.information_needed == []
 
 
 def test_tavily_search_normalizes_sources_without_extra_dependency() -> None:

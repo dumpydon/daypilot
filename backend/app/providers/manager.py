@@ -30,6 +30,7 @@ from backend.app.providers.oauth import (
     profile_for,
     x_authorization_url,
 )
+from backend.app.timing import timed
 
 SERVICE_CAPABILITIES = {
     "mail": ["search_mail", "get_thread", "get_message", "create_draft"],
@@ -114,7 +115,8 @@ class ConnectionManager:
         )
 
     def status(self, service: str) -> dict[str, Any]:
-        connection = self.connection(service)
+        with timed("provider.status"):
+            connection = self.connection(service)
         return {
             "provider": connection.provider,
             "provider_state": connection.state.value,

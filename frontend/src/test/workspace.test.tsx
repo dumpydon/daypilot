@@ -175,13 +175,17 @@ describe("DayPilot operations workspace", () => {
   });
 
   it("links both the header logo and wordmark to home with keyboard access", async () => {
-    render(<Header servers={capabilityCatalog.servers} reasoningMode="openai" onMenu={vi.fn()} />);
+    const onHome = vi.fn();
+    render(<Header servers={capabilityCatalog.servers} reasoningMode="openai" onMenu={vi.fn()} onHome={onHome} />);
     const home = screen.getByRole("link", { name: "DayPilot home" });
     expect(home).toHaveAttribute("href", "/");
     expect(home).toContainElement(screen.getByRole("img", { name: "DayPilot logo" }));
     expect(home).toContainElement(screen.getByText("DayPilot", { exact: true }));
     await userEvent.tab();
     expect(home).toHaveFocus();
+    fireEvent.click(home);
+    expect(onHome).toHaveBeenCalledOnce();
+    expect(window.location.pathname).toBe("/");
   });
 
   it("keeps OpenAI and local runtime status in one compact group", () => {

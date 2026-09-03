@@ -53,6 +53,13 @@ def _public_mode(request: Request) -> bool:
     return bool(getattr(request.app.state.settings, "public_demo_mode", False))
 
 
+def _invalidate_gateway_catalog(request: Request) -> None:
+    gateway = getattr(request.app.state, "gateway", None)
+    invalidate = getattr(gateway, "invalidate_catalog", None)
+    if invalidate is not None:
+        invalidate()
+
+
 async def _is_admin(request: Request) -> bool:
     service = _admin_service(request)
     if service is None:
@@ -217,7 +224,9 @@ async def list_connections(request: Request) -> ConnectionCatalog:
 @router.post("/api/connections/google/start", response_model=OAuthStartResponse)
 async def start_google_connection(request: Request) -> OAuthStartResponse:
     await _require_admin(request)
-    return request.app.state.connections.start_google()
+    result = request.app.state.connections.start_google()
+    _invalidate_gateway_catalog(request)
+    return result
 
 
 @router.get("/api/connections/google/callback")
@@ -231,6 +240,7 @@ async def google_callback(
     try:
         await _require_admin(request)
         await request.app.state.connections.complete_google(code, state, error)
+        _invalidate_gateway_catalog(request)
         return RedirectResponse(f"{settings.site_url}/?connection=google_connected")
     except Exception as exc:
         return RedirectResponse(
@@ -242,13 +252,16 @@ async def google_callback(
 async def disconnect_google(request: Request) -> ConnectionCatalog:
     await _require_admin(request)
     await request.app.state.connections.disconnect_google()
+    _invalidate_gateway_catalog(request)
     return request.app.state.connections.catalog()
 
 
 @router.post("/api/connections/x/start", response_model=OAuthStartResponse)
 async def start_x_connection(request: Request) -> OAuthStartResponse:
     await _require_admin(request)
-    return request.app.state.connections.start_x()
+    result = request.app.state.connections.start_x()
+    _invalidate_gateway_catalog(request)
+    return result
 
 
 @router.get("/api/connections/x/callback")
@@ -262,6 +275,7 @@ async def x_callback(
     try:
         await _require_admin(request)
         await request.app.state.connections.complete_x(code, state, error)
+        _invalidate_gateway_catalog(request)
         return RedirectResponse(f"{settings.site_url}/?connection=x_connected")
     except Exception as exc:
         return RedirectResponse(
@@ -289,6 +303,7 @@ async def managed_connection_callback(
             account_id,
             error,
         )
+        _invalidate_gateway_catalog(request)
         return RedirectResponse(f"{settings.site_url}/?connection={provider_name}_connected")
     except Exception as exc:
         return RedirectResponse(
@@ -301,6 +316,7 @@ async def managed_connection_callback(
 async def disconnect_x(request: Request) -> ConnectionCatalog:
     await _require_admin(request)
     await request.app.state.connections.disconnect_x()
+    _invalidate_gateway_catalog(request)
     return request.app.state.connections.catalog()
 
 
@@ -314,13 +330,16 @@ async def list_file_roots(request: Request) -> list[FileRoot]:
 @router.post("/api/connections/files/roots", response_model=FileRoot)
 async def add_file_root(payload: FileRootRequest, request: Request) -> FileRoot:
     await _require_admin(request)
-    return await request.app.state.connections.add_file_root(payload.path)
+    result = await request.app.state.connections.add_file_root(payload.path)
+    _invalidate_gateway_catalog(request)
+    return result
 
 
 @router.delete("/api/connections/files/roots/{root_id}", status_code=204)
 async def remove_file_root(root_id: str, request: Request) -> None:
     await _require_admin(request)
     await request.app.state.connections.remove_file_root(root_id)
+    _invalidate_gateway_catalog(request)
 
 
 @router.post("/api/run-history/clear", response_model=RunHistoryClearResponse)
@@ -390,7 +409,10 @@ async def list_tools(request: Request) -> dict[str, Any]:
             "tools": [],
         }
     tools = await gateway.discover(
-        force=not bool(gateway.catalog(admin_authorized=admin_authorized)),
+        # An empty catalog is also the normal startup-in-flight state.  Let the
+        # gateway's lock/cache decide whether discovery is needed so a page
+        # load cannot race startup into a second forced discovery.
+        force=False,
         admin_authorized=admin_authorized,
     )
     return {

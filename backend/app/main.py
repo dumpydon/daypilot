@@ -36,6 +36,7 @@ from backend.app.services.coordinator import RunCoordinator
 from backend.app.services.demo_workspace import DemoWorkspaceService
 from backend.app.services.planner import PlanBuilder
 from backend.app.services.reasoner import create_reasoner
+from backend.app.timing import timed
 from mcp_servers.common.database import ensure_demo_database_schema, initialize_demo_database
 
 logger = logging.getLogger(__name__)
@@ -84,18 +85,20 @@ async def _bootstrap_application(
         initializer = (
             initialize_demo_database if settings.daypilot_demo_mode else ensure_demo_database_schema
         )
-        if settings.daypilot_demo_mode:
-            await asyncio.to_thread(
-                initializer,
-                settings.database_target,
-                settings.daypilot_timezone,
-            )
-        else:
-            await asyncio.to_thread(initializer, settings.database_target)
+        with timed("startup.service_database"):
+            if settings.daypilot_demo_mode:
+                await asyncio.to_thread(
+                    initializer,
+                    settings.database_target,
+                    settings.daypilot_timezone,
+                )
+            else:
+                await asyncio.to_thread(initializer, settings.database_target)
 
         stage = "application database"
         repository = DayPilotRepository(settings.database_target)
-        await repository.initialize()
+        with timed("startup.application_database"):
+            await repository.initialize()
         app.state.database_state = "connected"
         provider_defaults = {
             service: settings.configured_provider(service)
@@ -131,7 +134,8 @@ async def _bootstrap_application(
 
         stage = "LangGraph checkpointer"
         async with checkpointer_context as checkpointer:
-            await checkpointer.setup()
+            with timed("startup.checkpointer_setup"):
+                await checkpointer.setup()
             graph = build_daypilot_graph(
                 WorkflowDependencies(
                     repository=repository,
@@ -219,7 +223,8 @@ def _redacted_bootstrap_traceback(exc: Exception, settings: Settings) -> str:
 async def _initialize_runtime(app: FastAPI, gateway: MCPGateway, settings: Settings) -> None:
     """Warm MCP transports after the lightweight server startup has completed."""
     try:
-        await gateway.discover(force=True, admin_authorized=True)
+        with timed("startup.mcp_discovery"):
+            await gateway.discover(force=True, admin_authorized=True)
         catalog = gateway.catalog(admin_authorized=True)
         degraded: list[str] = []
         degraded_reasons: dict[str, str] = {}
@@ -298,21 +303,22 @@ app = FastAPI(
 @app.middleware("http")
 async def require_initialized_runtime(request: Request, call_next):
     startup_safe_paths = {"/api/readiness", "/api/admin/status"}
-    if (
-        request.url.path.startswith("/api/")
-        and request.url.path not in startup_safe_paths
-        and not getattr(request.app.state, "runtime_services_ready", False)
-    ):
-        readiness = getattr(request.app.state, "readiness", {})
-        return JSONResponse(
-            status_code=503,
-            content={
-                "detail": readiness.get(
-                    "message",
-                    "DayPilot is still waking up and connecting persistence.",
-                )
-            },
-        )
+    with timed("runtime.availability_check"):
+        if (
+            request.url.path.startswith("/api/")
+            and request.url.path not in startup_safe_paths
+            and not getattr(request.app.state, "runtime_services_ready", False)
+        ):
+            readiness = getattr(request.app.state, "readiness", {})
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "detail": readiness.get(
+                        "message",
+                        "DayPilot is still waking up and connecting persistence.",
+                    )
+                },
+            )
     return await call_next(request)
 
 

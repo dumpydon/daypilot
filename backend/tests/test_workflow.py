@@ -113,6 +113,27 @@ async def test_read_only_request_completes_without_approval(harness) -> None:
 
 
 @pytest.mark.asyncio
+async def test_personal_runs_reuse_the_warm_mcp_catalog(harness, monkeypatch) -> None:
+    calls: list[bool] = []
+    original_discover = harness.gateway.discover
+
+    async def discover(*, force: bool = False, admin_authorized: bool = False):
+        calls.append(force)
+        return await original_discover(
+            force=force,
+            admin_authorized=admin_authorized,
+        )
+
+    monkeypatch.setattr(harness.gateway, "discover", discover)
+    first = await harness.coordinator.start_run("Search my latest mail about interview.")
+    await harness.coordinator.wait_until_settled(first.id)
+    second = await harness.coordinator.start_run("Search my latest mail about interview.")
+    await harness.coordinator.wait_until_settled(second.id)
+
+    assert calls == [False, False]
+
+
+@pytest.mark.asyncio
 async def test_files_read_is_grounded_and_does_not_need_approval(harness) -> None:
     accepted = await harness.coordinator.start_run("Find my latest resume.")
     detail = await harness.coordinator.wait_until_settled(accepted.id, max_wait_seconds=30)

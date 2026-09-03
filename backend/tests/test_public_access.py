@@ -136,6 +136,22 @@ def test_public_demo_blocks_personal_requests_and_hides_connection_metadata(
     assert coordinator.calls == []
 
 
+def test_tools_endpoint_does_not_force_discovery_when_catalog_is_empty(tmp_path: Path) -> None:
+    app, _ = _app(tmp_path)
+    calls: list[dict[str, object]] = []
+
+    class Gateway(StubGateway):
+        async def discover(self, **kwargs):
+            calls.append(kwargs)
+            return []
+
+    app.state.gateway = Gateway()
+    response = TestClient(app).get("/api/tools")
+
+    assert response.status_code == 200
+    assert calls == [{"force": False, "admin_authorized": False}]
+
+
 def test_public_policy_does_not_block_ordinary_general_creation_prompts(tmp_path: Path) -> None:
     app, coordinator = _app(tmp_path)
     app.state.runtime_state = "degraded"

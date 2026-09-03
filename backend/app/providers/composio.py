@@ -18,6 +18,7 @@ from backend.app.config import Settings
 from backend.app.domain.errors import ProviderUnavailableError
 from backend.app.persistence.database import connect_sync
 from backend.app.providers.managed_state import ManagedStateStore
+from backend.app.timing import timed
 
 try:  # Keep demo/direct mode importable when the optional managed extra is absent.
     from composio import SESSION_PRESET_DIRECT_TOOLS, Composio
@@ -93,6 +94,8 @@ class ComposioManagedClient:
         self._composio_factory = composio_factory
         self._mcp_client_factory = mcp_client_factory or MultiServerMCPClient
         self._client_instance: Any | None = None
+        self._session_cache: dict[str, tuple[str, Any]] = {}
+        self._mcp_tool_cache: dict[str, dict[str, Any]] = {}
         self._lock = threading.RLock()
 
     def configured(self) -> bool:
@@ -168,6 +171,7 @@ class ComposioManagedClient:
         # session. Never reuse that session after OAuth changes account state;
         # the next call creates a fresh MCP session bound to this account.
         self.state.delete_session(toolkit)
+        self._invalidate_session_cache(toolkit)
         return {
             "toolkit": toolkit,
             "account_id": str(account_id),
@@ -191,6 +195,7 @@ class ComposioManagedClient:
                 raise self._error("Composio could not disconnect this account", exc) from exc
         self.state.delete_account(toolkit)
         self.state.delete_session(toolkit)
+        self._invalidate_session_cache(toolkit)
 
     def account(self, toolkit: str) -> dict[str, str | None] | None:
         self._validate_toolkit(toolkit)
@@ -218,11 +223,19 @@ class ComposioManagedClient:
             "timeout": self.settings.provider_http_timeout_seconds,
         }
         try:
+            session_id = str(getattr(session, "session_id", "") or "")
             result = _run_async(
-                self._invoke_mcp(connection, tool_slug, arguments),
+                self._invoke_mcp(
+                    connection,
+                    tool_slug,
+                    arguments,
+                    cache_key=f"{toolkit}:{session_id}" if session_id else None,
+                ),
             )
         except ProviderUnavailableError as exc:
             message = str(exc)
+            if "did not expose the curated capability" in message:
+                self._invalidate_session_cache(toolkit)
             if (
                 tool_slug == "GOOGLESUPER_GET_PROFILE"
                 and "did not expose the curated capability" in message
@@ -230,6 +243,7 @@ class ComposioManagedClient:
                 # Existing sessions may predate the profile read capability.
                 # Refresh only this harmless read; never retry a mutation.
                 self.state.delete_session(toolkit)
+                self._invalidate_session_cache(toolkit)
                 fresh = self._session(toolkit)
                 fresh_mcp = getattr(fresh, "mcp", None)
                 fresh_connection = {
@@ -245,10 +259,16 @@ class ComposioManagedClient:
                     "timeout": self.settings.provider_http_timeout_seconds,
                 }
                 result = _run_async(
-                    self._invoke_mcp(fresh_connection, tool_slug, arguments),
+                    self._invoke_mcp(
+                        fresh_connection,
+                        tool_slug,
+                        arguments,
+                        cache_key=f"{toolkit}:{getattr(fresh, 'session_id', '')}",
+                    ),
                 )
                 return _as_dict(result)
             if _looks_like_reauth_error(message):
+                self._invalidate_session_cache(toolkit)
                 account = self.state.account(toolkit)
                 if account:
                     self.state.set_account(
@@ -260,6 +280,9 @@ class ComposioManagedClient:
                     )
             raise
         except Exception as exc:
+            # A transport/session failure may mean the hosted session expired;
+            # do not retain its cached wrappers for the next request.
+            self._invalidate_session_cache(toolkit)
             raise self._error("Composio managed capability failed", exc) from exc
         if isinstance(result, dict) and result.get("error"):
             raise ProviderUnavailableError(_safe_error(str(result["error"])))
@@ -270,18 +293,31 @@ class ComposioManagedClient:
         connection: dict[str, Any],
         tool_slug: str,
         arguments: dict[str, Any],
+        *,
+        cache_key: str | None = None,
     ) -> Any:
-        client = self._mcp_client_factory(
-            {"composio": connection},
-            handle_tool_errors=False,
-        )
-        tools = await client.get_tools(server_name="composio")
-        target = next((tool for tool in tools if tool.name == tool_slug), None)
+        tools_by_name = self._mcp_tool_cache.get(cache_key) if cache_key else None
+        if tools_by_name is None:
+            client = self._mcp_client_factory(
+                {"composio": connection},
+                handle_tool_errors=False,
+            )
+            with timed("composio.mcp_tool_discovery"):
+                tools = await client.get_tools(server_name="composio")
+            tools_by_name = {tool.name: tool for tool in tools}
+            if cache_key:
+                self._mcp_tool_cache[cache_key] = tools_by_name
+        target = tools_by_name.get(tool_slug)
         if target is None:
             raise ProviderUnavailableError(
                 f"Composio did not expose the curated capability {tool_slug}."
             )
-        return _unwrap_result(await target.ainvoke(arguments))
+        stage = {
+            "GOOGLESUPER_FETCH_EMAILS": "composio.search_mail",
+            "GOOGLESUPER_FETCH_MESSAGE_BY_THREAD_ID": "composio.get_thread",
+        }.get(tool_slug, "composio.tool_invoke")
+        with timed(stage):
+            return _unwrap_result(await target.ainvoke(arguments))
 
     def _client(self) -> Any:
         if self._client_instance is not None:
@@ -310,43 +346,63 @@ class ComposioManagedClient:
 
     def _session(self, toolkit: str) -> Any:
         self._validate_toolkit(toolkit)
-        client = self._client()
-        existing = self.state.session(toolkit)
-        if existing:
-            try:
-                return client.sessions.use(existing["session_id"], mcp=True)
-            except Exception:
-                # A deleted/expired Composio session is safe to replace; no
-                # provider fallback is attempted.
-                pass
-        user_id = self.state.ensure_user_id()
-        active_account = self.state.account(toolkit)
-        session_options: dict[str, Any] = {
-            "user_id": user_id,
-            "toolkits": [toolkit],
-            "tools": {toolkit: {"enable": list(MANAGED_TOOL_SLUGS[toolkit])}},
-            "session_preset": SESSION_PRESET_DIRECT_TOOLS,
-            "manage_connections": False,
-            "mcp": True,
-        }
-        if (
-            active_account
-            and str(active_account.get("status") or "").upper() == "ACTIVE"
-            and active_account.get("account_id")
-            and active_account.get("account_id") != "pending"
-        ):
-            # manage_connections=False disables Composio's in-session auth
-            # helper, so pin the already-authorized account explicitly.
-            session_options["connected_accounts"] = {toolkit: [str(active_account["account_id"])]}
-        try:
-            session = client.sessions.create(**session_options)
-        except Exception as exc:
-            raise self._error("Composio could not create a managed MCP session", exc) from exc
-        session_id = str(getattr(session, "session_id", "") or "")
-        if not session_id:
-            raise ProviderUnavailableError("Composio returned a session without an ID.")
-        self.state.set_session(toolkit, session_id, user_id)
-        return session
+        with timed("composio.session_resolution"):
+            with self._lock:
+                client = self._client()
+                existing = self.state.session(toolkit)
+                persisted_id = str((existing or {}).get("session_id") or "")
+                cached = self._session_cache.get(toolkit)
+                if cached and cached[0] == persisted_id:
+                    return cached[1]
+                if existing:
+                    try:
+                        session = client.sessions.use(persisted_id, mcp=True)
+                        self._session_cache[toolkit] = (persisted_id, session)
+                        return session
+                    except Exception:
+                        # A deleted/expired Composio session is safe to replace; no
+                        # provider fallback is attempted.
+                        self._invalidate_session_cache(toolkit)
+                user_id = self.state.ensure_user_id()
+                active_account = self.state.account(toolkit)
+                session_options: dict[str, Any] = {
+                    "user_id": user_id,
+                    "toolkits": [toolkit],
+                    "tools": {toolkit: {"enable": list(MANAGED_TOOL_SLUGS[toolkit])}},
+                    "session_preset": SESSION_PRESET_DIRECT_TOOLS,
+                    "manage_connections": False,
+                    "mcp": True,
+                }
+                if (
+                    active_account
+                    and str(active_account.get("status") or "").upper() == "ACTIVE"
+                    and active_account.get("account_id")
+                    and active_account.get("account_id") != "pending"
+                ):
+                    # manage_connections=False disables Composio's in-session auth
+                    # helper, so pin the already-authorized account explicitly.
+                    session_options["connected_accounts"] = {
+                        toolkit: [str(active_account["account_id"])]
+                    }
+                try:
+                    session = client.sessions.create(**session_options)
+                except Exception as exc:
+                    raise self._error(
+                        "Composio could not create a managed MCP session", exc
+                    ) from exc
+                session_id = str(getattr(session, "session_id", "") or "")
+                if not session_id:
+                    raise ProviderUnavailableError("Composio returned a session without an ID.")
+                self.state.set_session(toolkit, session_id, user_id)
+                self._session_cache[toolkit] = (session_id, session)
+                return session
+
+    def _invalidate_session_cache(self, toolkit: str) -> None:
+        self._session_cache.pop(toolkit, None)
+        prefix = f"{toolkit}:"
+        for key in tuple(self._mcp_tool_cache):
+            if key.startswith(prefix):
+                self._mcp_tool_cache.pop(key, None)
 
     @staticmethod
     def _validate_toolkit(toolkit: str) -> None:

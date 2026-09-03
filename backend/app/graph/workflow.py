@@ -26,6 +26,7 @@ from backend.app.persistence.repository import DayPilotRepository
 from backend.app.services.planner import PlanBuilder
 from backend.app.services.reasoner import Reasoner
 from backend.app.services.summarizer import summarize_execution
+from backend.app.timing import timed
 
 
 @dataclass(frozen=True)
@@ -81,7 +82,10 @@ def build_daypilot_graph(dependencies: WorkflowDependencies, checkpointer: Any):
 
     async def discover_tools(state: DayPilotState) -> dict[str, Any]:
         admin_authorized = bool(state.get("admin_authorized", False))
-        tools = await gateway.discover(force=True, admin_authorized=admin_authorized)
+        # Discovery is process-cached by the gateway.  A run should reuse the
+        # warm catalog; force a refresh only through an explicit startup,
+        # reconnect, or admin/provider invalidation path.
+        tools = await gateway.discover(force=False, admin_authorized=admin_authorized)
         catalog = gateway.catalog(admin_authorized=admin_authorized)
         connected = sum(server["connected"] for server in catalog)
         await repository.append_event(
@@ -669,12 +673,18 @@ async def _invoke_read(
         {"tool_name": tool_name, "arguments": arguments, "risk": "SAFE_READ"},
     )
     try:
-        result = await _invoke_gateway(
-            gateway,
-            tool_name,
-            arguments,
-            admin_authorized=admin_authorized,
+        stage = (
+            f"workflow.{tool_name}"
+            if tool_name in {"search_mail", "get_thread"}
+            else "workflow.read"
         )
+        with timed(stage):
+            result = await _invoke_gateway(
+                gateway,
+                tool_name,
+                arguments,
+                admin_authorized=admin_authorized,
+            )
         await repository.append_event(
             run_id,
             "tool_completed",

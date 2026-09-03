@@ -39,6 +39,7 @@ import type {
   ReadinessStatus,
   ToolCatalog,
 } from "@/lib/types";
+import { endTiming, startTiming } from "@/lib/timing";
 
 import { ContextPanel } from "./ContextPanel";
 import { ConfirmationDialog } from "./ConfirmationDialog";
@@ -243,6 +244,7 @@ export function DayPilotWorkspace() {
   useEffect(() => {
     if (!activeRun?.id) return;
     const runId = activeRun.id;
+    const streamTiming = startTiming("sse-stream");
     const source = new EventSource(`${API_URL}/api/runs/${runId}/events`, { withCredentials: true });
     let refreshTimer: ReturnType<typeof setTimeout> | null = null;
     const scheduleRefresh = () => {
@@ -254,6 +256,7 @@ export function DayPilotWorkspace() {
     for (const eventName of streamEvents) source.addEventListener(eventName, scheduleRefresh);
     source.addEventListener("end", () => {
       scheduleRefresh();
+      endTiming("sse-stream", streamTiming);
       source.close();
     });
     return () => {
@@ -285,6 +288,7 @@ export function DayPilotWorkspace() {
     setBusy(true);
     setError(null);
     setActiveRun(null);
+    const submitTiming = startTiming("run-submit");
     try {
       const accepted = await createRun(goal);
       let detail: RunDetail | null = null;
@@ -297,9 +301,16 @@ export function DayPilotWorkspace() {
     } catch (cause) {
       setError(messageFrom(cause));
     } finally {
+      endTiming("run-submit", submitTiming);
       setBusy(false);
     }
   }
+
+  const handleHome = useCallback(() => {
+    setActiveRun(null);
+    setError(null);
+    setMobileSidebarOpen(false);
+  }, []);
 
   async function selectRun(runId: string) {
     setError(null);
@@ -482,6 +493,7 @@ export function DayPilotWorkspace() {
           adminAuthenticated={adminStatus.authenticated}
           active={busy || Boolean(activeRun && ["queued", "running", "resuming"].includes(activeRun.status))}
           onMenu={() => setMobileSidebarOpen(true)}
+          onHome={handleHome}
         />
         <div
           className={`${styles.layout} ${sidebarCollapsed ? styles.layoutCollapsed : ""} ${mobileSidebarOpen ? styles.layoutMobileOpen : ""}`}
