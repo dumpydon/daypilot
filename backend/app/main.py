@@ -222,6 +222,7 @@ async def _initialize_runtime(app: FastAPI, gateway: MCPGateway, settings: Setti
         await gateway.discover(force=True, admin_authorized=True)
         catalog = gateway.catalog(admin_authorized=True)
         degraded: list[str] = []
+        degraded_reasons: dict[str, str] = {}
         for server in catalog:
             if settings.public_demo_mode and server["name"] != "web":
                 # Private providers are intentionally outside anonymous runtime
@@ -229,9 +230,14 @@ async def _initialize_runtime(app: FastAPI, gateway: MCPGateway, settings: Setti
                 continue
             if not server["connected"]:
                 degraded.append(server["name"])
+                degraded_reasons[server["name"]] = "MCP tool discovery failed"
                 continue
             if server.get("provider_state") not in {None, "connected"}:
                 degraded.append(server["name"])
+                degraded_reasons[server["name"]] = _provider_degradation_reason(
+                    server,
+                    settings,
+                )
         state = RuntimeState.DEGRADED if degraded else RuntimeState.READY
         if state == RuntimeState.READY:
             message = (
@@ -242,6 +248,7 @@ async def _initialize_runtime(app: FastAPI, gateway: MCPGateway, settings: Setti
         else:
             message = "DayPilot is ready with limited capabilities: " + ", ".join(degraded) + "."
         app.state.runtime_state = state.value
+        app.state.readiness_diagnostics = degraded_reasons
         app.state.readiness = {
             "state": state.value,
             "mcp_servers_ready": sum(server["connected"] for server in catalog),
@@ -249,6 +256,13 @@ async def _initialize_runtime(app: FastAPI, gateway: MCPGateway, settings: Setti
             "degraded_services": degraded,
             "message": message,
         }
+        if degraded_reasons:
+            reasons = "; ".join(f"{name}={reason}" for name, reason in degraded_reasons.items())
+            logger.warning(
+                "DayPilot readiness degraded (public_demo_mode=%s): %s",
+                settings.public_demo_mode,
+                reasons,
+            )
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -261,6 +275,16 @@ async def _initialize_runtime(app: FastAPI, gateway: MCPGateway, settings: Setti
             "message": "DayPilot is ready with limited MCP capabilities.",
         }
         app.state.readiness_error = str(exc)
+
+
+def _provider_degradation_reason(server: dict[str, object], settings: Settings) -> str:
+    """Describe provider readiness without logging account or credential details."""
+    name = str(server.get("name") or "provider")
+    state = str(server.get("provider_state") or "unavailable").replace("_", " ")
+    mode = str(server.get("connection_mode") or "provider").replace("_", " ")
+    if name == "web" and not settings.tavily_api_key:
+        return "TAVILY_API_KEY not configured"
+    return f"{mode} provider {state}"
 
 
 app = FastAPI(

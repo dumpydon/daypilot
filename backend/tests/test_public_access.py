@@ -385,6 +385,58 @@ async def test_public_readiness_ignores_private_provider_failures() -> None:
 
 
 @pytest.mark.asyncio
+async def test_readiness_separates_mcp_discovery_from_provider_degradation(caplog) -> None:
+    settings = Settings(
+        _env_file=None,
+        daypilot_demo_mode=False,
+        public_demo_mode=False,
+        tavily_api_key=None,
+    )
+    states = {
+        "mail": ("disconnected", "managed"),
+        "calendar": ("disconnected", "managed"),
+        "tasks": ("disconnected", "managed"),
+        "files": ("disconnected", "local"),
+        "x": ("unavailable", "managed"),
+        "web": ("unavailable", "direct"),
+    }
+
+    class FakeGateway:
+        connections: ClassVar[dict[str, dict[str, str]]] = {name: {} for name in states}
+
+        async def discover(self, **_kwargs):
+            return [object()]
+
+        def catalog(self, **_kwargs):
+            return [
+                {
+                    "name": name,
+                    "connected": True,
+                    "tool_count": 1,
+                    "provider_state": provider_state,
+                    "connection_mode": connection_mode,
+                }
+                for name, (provider_state, connection_mode) in states.items()
+            ]
+
+    app = SimpleNamespace(state=SimpleNamespace())
+    await _initialize_runtime(app, FakeGateway(), settings)
+
+    assert app.state.readiness["mcp_servers_ready"] == 6
+    assert app.state.readiness["degraded_services"] == list(states)
+    assert app.state.readiness_diagnostics == {
+        "mail": "managed provider disconnected",
+        "calendar": "managed provider disconnected",
+        "tasks": "managed provider disconnected",
+        "files": "local provider disconnected",
+        "x": "managed provider unavailable",
+        "web": "TAVILY_API_KEY not configured",
+    }
+    assert "public_demo_mode=False" in caplog.text
+    assert "account" not in caplog.text.lower()
+
+
+@pytest.mark.asyncio
 async def test_admin_authorization_does_not_bypass_the_existing_hitl_gate(harness) -> None:
     accepted = await harness.coordinator.start_run(
         "Create a Google Task called 'admin gate regression test'.",
