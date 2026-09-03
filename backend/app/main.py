@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+import traceback
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -162,7 +164,12 @@ async def _bootstrap_application(
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        logger.error("DayPilot bootstrap failed during %s (%s)", stage, type(exc).__name__)
+        logger.error(
+            "DayPilot bootstrap failed during %s (%s)\n%s",
+            stage,
+            type(exc).__name__,
+            _redacted_bootstrap_traceback(exc, settings),
+        )
         if app.state.database_state != "connected":
             app.state.database_state = "unavailable"
         app.state.graph_state = "unavailable"
@@ -177,6 +184,36 @@ async def _bootstrap_application(
             "message": f"DayPilot persistence is unavailable during {stage} initialization.",
         }
         await shutdown_event.wait()
+
+
+def _redacted_bootstrap_traceback(exc: Exception, settings: Settings) -> str:
+    """Keep startup diagnostics useful without placing credentials in logs."""
+    trace = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    secrets = (
+        settings.database_url,
+        settings.database_connection_url,
+        settings.openai_api_key,
+        settings.tavily_api_key,
+        settings.composio_api_key,
+        settings.admin_secret,
+        settings.google_client_secret,
+        settings.x_client_secret,
+    )
+    for secret in secrets:
+        if secret:
+            trace = trace.replace(secret, "[redacted]")
+    trace = re.sub(
+        r"(?i)(postgres(?:ql)?://)[^\s'\"`]+",
+        r"\1[redacted]",
+        trace,
+    )
+    trace = re.sub(
+        r"(?i)(password|api[_ -]?key|access[_ -]?token|refresh[_ -]?token|secret)"
+        r"\s*[=:]\s*[^\s,;]+",
+        r"\1=[redacted]",
+        trace,
+    )
+    return trace
 
 
 async def _initialize_runtime(app: FastAPI, gateway: MCPGateway, settings: Settings) -> None:

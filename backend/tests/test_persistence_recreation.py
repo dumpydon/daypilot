@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
@@ -9,7 +12,7 @@ from backend.app.config import Settings
 from backend.app.domain.models import EventState, PreferenceSet
 from backend.app.graph.workflow import WorkflowDependencies, build_daypilot_graph
 from backend.app.mcp.gateway import MCPGateway
-from backend.app.persistence.database import _adapt_sql, is_postgres_target
+from backend.app.persistence.database import AsyncConnection, _adapt_sql, is_postgres_target
 from backend.app.persistence.repository import DayPilotRepository
 from backend.app.providers.managed_state import ManagedStateStore
 from backend.app.services.coordinator import RunCoordinator
@@ -89,6 +92,114 @@ def test_postgres_database_url_wins_over_stale_local_mcp_path(monkeypatch) -> No
     monkeypatch.setenv("DAYPILOT_DATABASE_PATH", "/tmp/stale-daypilot.db")
 
     assert database_path_from_env() == "postgresql://user:pass@host/daypilot"
+
+
+@pytest.mark.asyncio
+async def test_postgres_application_initialization_uses_cursor_executemany(monkeypatch) -> None:
+    import backend.app.persistence.repository as repository_module
+
+    class FakeCursor:
+        def __init__(self, query: str = "") -> None:
+            self.query = query
+            self.rows: list[dict[str, object]] = []
+            self.executemany_calls: list[tuple[str, list[object]]] = []
+
+        async def fetchone(self):
+            if "information_schema.columns" in self.query:
+                return {"present": 1}
+            return self.rows[0] if self.rows else None
+
+        async def fetchall(self):
+            return self.rows
+
+        async def executemany(self, query, parameters):
+            self.executemany_calls.append((query, list(parameters)))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    class FakePsycopgConnection:
+        def __init__(self) -> None:
+            self.cursors: list[FakeCursor] = []
+
+        async def execute(self, query, _parameters=()):
+            cursor = FakeCursor(query)
+            self.cursors.append(cursor)
+            return cursor
+
+        def cursor(self):
+            cursor = FakeCursor()
+            self.cursors.append(cursor)
+            return cursor
+
+        async def commit(self):
+            return None
+
+        async def rollback(self):
+            return None
+
+        async def close(self):
+            return None
+
+    fake_driver_connection = FakePsycopgConnection()
+    wrapped = AsyncConnection(fake_driver_connection, postgres=True)
+
+    @asynccontextmanager
+    async def fake_connect(_target):
+        yield wrapped
+
+    monkeypatch.setattr(repository_module, "connect_async", fake_connect)
+    repository = DayPilotRepository("postgresql://user:pass@host/daypilot")
+    await repository.initialize()
+    await repository.ensure_provider_modes(
+        {service: "managed" for service in ("mail", "calendar", "tasks", "files", "x")}
+    )
+
+    batches = [cursor.executemany_calls for cursor in fake_driver_connection.cursors]
+    assert any(batch and len(batch[0][1]) == 5 for batch in batches)
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_logs_redacted_traceback_for_database_attribute_errors(
+    monkeypatch,
+    caplog,
+) -> None:
+    import backend.app.main as main_module
+
+    settings = Settings(
+        _env_file=None,
+        database_url="postgresql://user:password@host/daypilot",
+        daypilot_demo_mode=False,
+    )
+    shutdown_event = asyncio.Event()
+    shutdown_event.set()
+
+    def fail_schema(_target):
+        raise AttributeError("database adapter failed for postgresql://user:password@host/daypilot")
+
+    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(main_module, "ensure_demo_database_schema", fail_schema)
+    app = type(
+        "App",
+        (),
+        {"state": type("State", (), {"database_state": "initializing"})()},
+    )()
+    caplog.set_level(logging.ERROR)
+
+    await main_module._bootstrap_application(app, settings, shutdown_event)
+
+    assert "Traceback (most recent call last)" in caplog.text
+    assert "AttributeError" in caplog.text
+    assert "postgresql://user:password@host/daypilot" not in caplog.text
 
 
 def test_managed_composio_metadata_survives_store_recreation(tmp_path: Path) -> None:

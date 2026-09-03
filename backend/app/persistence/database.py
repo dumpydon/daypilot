@@ -124,7 +124,12 @@ class SyncConnection:
         parameters: Iterable[Sequence[Any] | Mapping[str, Any]],
     ) -> SyncCursor:
         adapted = _adapt_sql(query, None, postgres=self.postgres)
-        return SyncCursor(self._connection.executemany(adapted, parameters))
+        cursor = self._connection.cursor()
+        try:
+            cursor.executemany(adapted, parameters)
+            return SyncCursor(cursor)
+        finally:
+            cursor.close()
 
     def executescript(self, script: str) -> None:
         for statement in _statements(script):
@@ -221,7 +226,8 @@ class AsyncConnection:
         parameters: Iterable[Sequence[Any] | Mapping[str, Any]],
     ) -> None:
         adapted = _adapt_sql(query, None, postgres=self.postgres)
-        await self._connection.executemany(adapted, parameters)
+        async with self._connection.cursor() as cursor:
+            await cursor.executemany(adapted, parameters)
 
     async def executescript(self, script: str) -> None:
         for statement in _statements(script):
