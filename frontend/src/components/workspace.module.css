@@ -79,6 +79,7 @@
 .grid { display: grid; grid-template-columns: minmax(480px, 1.45fr) minmax(330px, .8fr); }
 .grid > section, .grid > aside { border-bottom: 1px solid #20242b; }
 .planPanel { padding: 24px 26px; border-right: 1px solid #20242b; }
+.planPanelPending { animation: panelIn 180ms ease-out both; }
 .timelinePanel { padding: 24px 25px; }
 .sectionHeader { display: flex; justify-content: space-between; align-items: flex-start; }
 .sectionHeader h2 { margin-top: 7px; font-size: 15px; font-weight: 610; letter-spacing: -.2px; }
@@ -123,6 +124,8 @@
 .spin { animation: spin 1.2s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .emptyTimeline { color: #636b77; font-size: 10px; padding: 4px; }
+.timelinePending { display: flex; align-items: center; gap: 8px; color: #9ca49e; }
+.timelinePendingDot { width: 6px; height: 6px; border-radius: 50%; background: #79a4ed; box-shadow: 0 0 7px #6f9fea55; animation: pulse 1.6s ease-in-out infinite; }
 
 .contextPanel, .toolsPanel { padding: 21px 26px 24px; }
 .contextPanel { border-right: 1px solid #20242b; }
@@ -753,6 +756,7 @@
     0 0 18px 6px rgba(110, 160, 255, .06),
     0 18px 60px #080b083d;
 }
+.requestFormSubmitting { border-color: #86b0ff; box-shadow: 0 0 0 2px rgba(110, 160, 255, .9), 0 0 18px 6px rgba(110, 160, 255, .16), 0 18px 60px #080b083d; }
 .requestForm textarea { min-height: 62px; max-height: 182px; font-size: 16px; line-height: 1.5; }
 .requestForm > button { top: 50%; right: 5px; bottom: auto; width: 60px; height: 55px; min-height: 55px; padding: 0; display: grid; place-items: center; border-radius: 13px; color: #0d1421; background: #6ea0ff; box-shadow: none; opacity: 0; pointer-events: none; transform: translateY(-50%); transition: opacity 220ms ease, background 180ms ease, color 180ms ease; }
 .requestFormReady > button { opacity: 1; pointer-events: auto; }

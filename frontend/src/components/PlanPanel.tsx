@@ -19,12 +19,13 @@ import styles from "./workspace.module.css";
 interface PlanPanelProps {
   run: RunDetail;
   busy: boolean;
+  pending?: boolean;
   onApprove: () => void;
   onReject: () => void;
   onEdit: (feedback: string) => void;
 }
 
-export function PlanPanel({ run, busy, onApprove, onReject, onEdit }: PlanPanelProps) {
+export function PlanPanel({ run, busy, pending = false, onApprove, onReject, onEdit }: PlanPanelProps) {
   const [editing, setEditing] = useState(false);
   const [feedback, setFeedback] = useState("");
   const hasDependencies = run.plan.some((action) => action.depends_on.length > 0);
@@ -60,12 +61,12 @@ export function PlanPanel({ run, busy, onApprove, onReject, onEdit }: PlanPanelP
         : "";
 
   return (
-    <section className={`${styles.planPanel} ${resolved ? styles.planPanelResolved : ""} ${waiting ? styles.planPanelApproval : ""}`}>
+    <section className={`${styles.planPanel} ${resolved ? styles.planPanelResolved : ""} ${waiting ? styles.planPanelApproval : ""} ${pending ? styles.planPanelPending : ""}`}>
       <div className={styles.sectionHeader}>
         <div>
-          <span className={styles.eyebrow}>{resolved ? "Run result" : "Proposed plan"}</span>
+          <span className={styles.eyebrow}>{pending ? "Run starting" : resolved ? "Run result" : "Proposed plan"}</span>
           <h2>
-            {resolved ? resultHeading(run.status, hasFailedOutput) : run.plan.length ? `${run.plan.length} coordinated actions` : "Building action plan"}
+            {pending ? "Preparing your request" : resolved ? resultHeading(run.status, hasFailedOutput) : run.plan.length ? `${run.plan.length} coordinated actions` : "Building action plan"}
             {!resolved && run.plan_revision > 0 && (
               <span className={styles.revision}>Revision {run.plan_revision}</span>
             )}
@@ -96,7 +97,7 @@ export function PlanPanel({ run, busy, onApprove, onReject, onEdit }: PlanPanelP
         answerOnly ? null : (
           <p className={styles.emptyPlan}>No executable plan was produced for this run.</p>
         )
-      ) : <PlanSkeleton /> : resolved ? (
+      ) : <PlanSkeleton pending={pending} /> : resolved ? (
         <>
           {meaningfulDependencyGraph && (
             <section className={styles.completedPlanSection} aria-labelledby={`plan-heading-${run.id}`}>
@@ -333,10 +334,10 @@ function PlanRow({
   );
 }
 
-function PlanSkeleton() {
+function PlanSkeleton({ pending = false }: { pending?: boolean }) {
   return (
     <div className={styles.planSkeleton} aria-label="Plan loading">
-      <p><i />DayPilot is preparing the next actions…</p>
+      <p><i />{pending ? "Starting run…" : "DayPilot is preparing the next actions…"}</p>
       <div><span /><span /><span /></div>
     </div>
   );

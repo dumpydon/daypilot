@@ -16,10 +16,11 @@ interface RequestComposerProps {
   onSubmit: (goal: string) => Promise<void> | void;
   busy: boolean;
   disabled?: boolean;
+  initialGoal?: string;
 }
 
-export function RequestComposer({ onSubmit, busy, disabled = false }: RequestComposerProps) {
-  const [goal, setGoal] = useState("");
+export function RequestComposer({ onSubmit, busy, disabled = false, initialGoal = "" }: RequestComposerProps) {
+  const [goal, setGoal] = useState(initialGoal);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [highlightedIndex, setHighlightedIndex] = useState(0);
   const [composerHovered, setComposerHovered] = useState(false);
@@ -103,7 +104,8 @@ export function RequestComposer({ onSubmit, busy, disabled = false }: RequestCom
         </div>
         <form
           onSubmit={submit}
-          className={`${styles.requestForm} ${goal.trim() ? styles.requestFormReady : ""}`}
+          aria-busy={busy}
+          className={`${styles.requestForm} ${goal.trim() ? styles.requestFormReady : ""} ${busy ? styles.requestFormSubmitting : ""}`}
           data-testid="request-composer"
           onPointerEnter={() => setComposerHovered(true)}
           onPointerLeave={() => setComposerHovered(false)}
@@ -123,7 +125,7 @@ export function RequestComposer({ onSubmit, busy, disabled = false }: RequestCom
             rows={2}
             disabled={busy || disabled}
           />
-          <button type="submit" disabled={busy || disabled || !goal.trim()} aria-label="Start DayPilot run" title="Start DayPilot run">
+          <button type="submit" disabled={busy || disabled || !goal.trim()} aria-label={busy ? "Starting DayPilot run" : "Start DayPilot run"} title="Start DayPilot run">
             <ArrowRight size={19} strokeWidth={2.3} />
           </button>
         </form>

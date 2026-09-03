@@ -10,9 +10,10 @@ interface TimelinePanelProps {
   events: TimelineEvent[];
   runId?: string;
   runStatus?: RunStatus;
+  pending?: boolean;
 }
 
-export function TimelinePanel({ events, runId, runStatus }: TimelinePanelProps) {
+export function TimelinePanel({ events, runId, runStatus, pending = false }: TimelinePanelProps) {
   const [showDetails, setShowDetails] = useState(false);
   const groupedEvents = useMemo(() => groupEvents(events), [events]);
   const effectiveStatus = runStatus ?? inferredStatus(groupedEvents);
@@ -85,7 +86,10 @@ export function TimelinePanel({ events, runId, runStatus }: TimelinePanelProps) 
         >
           <div className={styles.timeline}>
             {groupedEvents.length === 0 ? (
-              <p className={styles.emptyTimeline}>The workflow is starting…</p>
+              <p className={`${styles.emptyTimeline} ${pending ? styles.timelinePending : ""}`}>
+                {pending && <i className={styles.timelinePendingDot} aria-hidden="true" />}
+                {pending ? "Starting run…" : "The workflow is starting…"}
+              </p>
             ) : groupedEvents.map((event, index) => {
               const current = index === currentIndex;
               const visualState = !isLive && event.state === "running"

@@ -87,6 +87,15 @@ const streamEvents = [
   "action_failed", "execution_verified", "run_rejected", "run_completed", "run_failed",
 ];
 const RUN_REFRESH_FALLBACK_MS = 3_000;
+const OPTIMISTIC_RUN_ID = "optimistic-run";
+const EMPTY_RUN_CONTEXT = {
+  web: [],
+  mail: [],
+  calendar: [],
+  tasks: [],
+  files: [],
+  x: [],
+};
 
 export function DayPilotWorkspace() {
   const [catalog, setCatalog] = useState<ToolCatalog>(emptyCatalog);
@@ -95,6 +104,7 @@ export function DayPilotWorkspace() {
   const [preferences, setPreferences] = useState<Preferences>(defaultPreferences);
   const [runs, setRuns] = useState<RunRecord[]>([]);
   const [activeRun, setActiveRun] = useState<RunDetail | null>(null);
+  const [draftGoal, setDraftGoal] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [preferencesOpen, setPreferencesOpen] = useState(false);
@@ -117,6 +127,8 @@ export function DayPilotWorkspace() {
   const [capabilityInspectorOpen, setCapabilityInspectorOpen] = useState(false);
   const [selectedCapability, setSelectedCapability] = useState<string | null>(null);
   const capabilityInspectorRef = useRef<HTMLElement>(null);
+  const submitInFlightRef = useRef(false);
+  const submitGenerationRef = useRef(0);
   const [runtimeMode, setRuntimeMode] = useState("unknown");
   const [readiness, setReadiness] = useState<ReadinessStatus>({
     state: "starting",
@@ -163,7 +175,9 @@ export function DayPilotWorkspace() {
 
   const refreshRuns = useCallback(async () => setRuns(await listRuns()), []);
   const refreshActive = useCallback(async (runId: string) => {
+    const viewGeneration = submitGenerationRef.current;
     const detail = await getRun(runId);
+    if (viewGeneration !== submitGenerationRef.current) return detail;
     setActiveRun(detail);
     setRuns((current) => {
       const summary: RunRecord = detail;
@@ -242,7 +256,7 @@ export function DayPilotWorkspace() {
   }, []);
 
   useEffect(() => {
-    if (!activeRun?.id) return;
+    if (!activeRun?.id || activeRun.id === OPTIMISTIC_RUN_ID) return;
     const runId = activeRun.id;
     const streamTiming = startTiming("sse-stream");
     const source = new EventSource(`${API_URL}/api/runs/${runId}/events`, { withCredentials: true });
@@ -266,7 +280,11 @@ export function DayPilotWorkspace() {
   }, [activeRun?.id, refreshActive]);
 
   useEffect(() => {
-    if (!activeRun || ["completed", "rejected", "failed", "waiting_approval"].includes(activeRun.status)) return;
+    if (
+      !activeRun
+      || activeRun.id === OPTIMISTIC_RUN_ID
+      || ["completed", "rejected", "failed", "waiting_approval"].includes(activeRun.status)
+    ) return;
     const timer = setInterval(() => {
       refreshActive(activeRun.id).catch((cause: unknown) => setError(messageFrom(cause)));
     }, RUN_REFRESH_FALLBACK_MS);
@@ -277,6 +295,7 @@ export function DayPilotWorkspace() {
     ? activeRun.reasoning_mode
     : runtimeMode;
   const activeId = activeRun?.id ?? null;
+  const isOptimisticRun = activeRun?.id === OPTIMISTIC_RUN_ID;
   const shortId = useMemo(() => activeId?.replace("run-", "").slice(0, 6).toUpperCase(), [activeId]);
   const presentedStatus = activeRun ? presentationStatus(activeRun) : null;
 
@@ -285,29 +304,45 @@ export function DayPilotWorkspace() {
       setError("DayPilot is still waking up and connecting services. Try again shortly.");
       return;
     }
+    if (submitInFlightRef.current) return;
+    submitInFlightRef.current = true;
+    const generation = submitGenerationRef.current + 1;
+    submitGenerationRef.current = generation;
     setBusy(true);
     setError(null);
-    setActiveRun(null);
+    setDraftGoal(goal);
+    setActiveRun(makeOptimisticRun(goal, preferences, runtimeMode));
     const submitTiming = startTiming("run-submit");
+    let realRunBound = false;
     try {
       const accepted = await createRun(goal);
+      if (generation !== submitGenerationRef.current) return;
       let detail: RunDetail | null = null;
       for (let attempt = 0; attempt < 20 && !detail; attempt += 1) {
         try { detail = await getRun(accepted.id); } catch { await delay(75); }
       }
       if (!detail) throw new Error("The run started but its persisted state is not readable yet.");
+      if (generation !== submitGenerationRef.current) return;
       setActiveRun(detail);
+      realRunBound = true;
+      setDraftGoal("");
       await refreshRuns();
     } catch (cause) {
-      setError(messageFrom(cause));
+      if (generation === submitGenerationRef.current) {
+        if (!realRunBound) setActiveRun(null);
+        setError(messageFrom(cause));
+      }
     } finally {
       endTiming("run-submit", submitTiming);
-      setBusy(false);
+      if (generation === submitGenerationRef.current) setBusy(false);
+      submitInFlightRef.current = false;
     }
   }
 
   const handleHome = useCallback(() => {
+    submitGenerationRef.current += 1;
     setActiveRun(null);
+    setDraftGoal("");
     setError(null);
     setMobileSidebarOpen(false);
   }, []);
@@ -506,7 +541,7 @@ export function DayPilotWorkspace() {
             collapsed={sidebarCollapsed}
             mobileOpen={mobileSidebarOpen}
             onSelect={selectRun}
-            onNew={() => { setActiveRun(null); setMobileSidebarOpen(false); }}
+            onNew={handleHome}
             onPreferences={() => setPreferencesOpen(true)}
             onToggle={() => setSidebarCollapsedOverride(!sidebarCollapsed)}
             onCloseMobile={() => setMobileSidebarOpen(false)}
@@ -522,7 +557,12 @@ export function DayPilotWorkspace() {
             )}
             {!activeRun ? (
               <div className={styles.startView}>
-                <RequestComposer onSubmit={start} busy={busy} disabled={readiness.state === "starting"} />
+                <RequestComposer
+                  onSubmit={start}
+                  busy={busy}
+                  disabled={readiness.state === "starting"}
+                  initialGoal={draftGoal}
+                />
                 {readiness.state === "starting" ? (
                   <section className={styles.capabilityLoading} aria-label="Capabilities connecting">
                     <span className={styles.eyebrow}>Connected services</span>
@@ -563,21 +603,21 @@ export function DayPilotWorkspace() {
                     <div className={`${styles.currentState} ${styles[`currentState_${presentedStatus ?? activeRun.status}`]}`} aria-live="polite">
                       <i />
                       <div>
-                        <strong>{currentStateLabel(activeRun, presentedStatus ?? activeRun.status)}</strong>
+                        <strong>{isOptimisticRun ? "Starting run" : currentStateLabel(activeRun, presentedStatus ?? activeRun.status)}</strong>
                         <span>
-                          <b className={`${styles.runStatus} ${styles[`runStatus_${presentedStatus ?? activeRun.status}`]}`}>{prettyStatus(presentedStatus ?? activeRun.status)}</b>
-                          <span className={styles.runId}>Run {shortId}</span>
+                          <b className={`${styles.runStatus} ${styles[`runStatus_${presentedStatus ?? activeRun.status}`]}`}>{isOptimisticRun ? "Starting" : prettyStatus(presentedStatus ?? activeRun.status)}</b>
+                          <span className={styles.runId}>{isOptimisticRun ? "Run pending" : `Run ${shortId}`}</span>
                         </span>
                       </div>
                     </div>
-                    <button onClick={() => refreshActive(activeRun.id)} aria-label="Refresh run" title="Refresh run">
+                    <button onClick={() => refreshActive(activeRun.id)} disabled={isOptimisticRun} aria-label="Refresh run" title="Refresh run">
                       <RotateCcw size={14} />
                     </button>
                   </div>
                 </div>
                 <div className={`${styles.grid} ${["completed", "failed", "rejected"].includes(activeRun.status) ? styles.gridResolved : ""}`}>
-                  <PlanPanel key={`${activeRun.id}-${activeRun.plan_revision}-${activeRun.status}`} run={activeRun} busy={busy} onApprove={() => decide("approve")} onReject={() => decide("reject")} onEdit={revise} />
-                  <TimelinePanel events={activeRun.events} runId={activeRun.id} runStatus={activeRun.status} />
+                  <PlanPanel key={`${activeRun.id}-${activeRun.plan_revision}-${activeRun.status}`} run={activeRun} busy={busy} pending={isOptimisticRun} onApprove={() => decide("approve")} onReject={() => decide("reject")} onEdit={revise} />
+                  <TimelinePanel events={activeRun.events} runId={activeRun.id} runStatus={activeRun.status} pending={isOptimisticRun} />
                   <div className={styles.inspectorShelf}>
                     {activeRun.intent?.request_kind !== "general" && (
                       <ContextPanel context={activeRun.context} />
@@ -654,6 +694,39 @@ export function DayPilotWorkspace() {
 
 function messageFrom(cause: unknown): string {
   return cause instanceof Error ? cause.message : "DayPilot encountered an unexpected error.";
+}
+
+function makeOptimisticRun(
+  userRequest: string,
+  preferences: Preferences,
+  runtimeMode: string,
+): RunDetail {
+  const now = new Date().toISOString();
+  return {
+    id: OPTIMISTIC_RUN_ID,
+    thread_id: "optimistic-thread",
+    user_request: userRequest,
+    status: "queued",
+    approval_status: "not_required",
+    approval_feedback: null,
+    plan: [],
+    final_summary: null,
+    error: null,
+    created_at: now,
+    updated_at: now,
+    intent: null,
+    available_tools: [],
+    context: EMPTY_RUN_CONTEXT,
+    execution_results: [],
+    verification_results: [],
+    created_outputs: [],
+    events: [],
+    preferences,
+    reasoning_mode: runtimeMode === "unknown" ? "pending" : runtimeMode,
+    interrupt_payload: null,
+    plan_revision: 0,
+    plan_hash: null,
+  };
 }
 
 function delay(milliseconds: number) {
