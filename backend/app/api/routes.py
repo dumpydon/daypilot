@@ -84,9 +84,17 @@ async def _require_run_access(request: Request, run_id: str) -> bool:
 
 
 @router.get("/health", response_model=HealthResponse)
-async def health(request: Request) -> HealthResponse:
-    _, _, _, settings = _services(request)
+async def health(request: Request, response: Response) -> HealthResponse:
+    settings = request.app.state.settings
+    database_state = getattr(request.app.state, "database_state", "initializing")
+    graph_state = getattr(request.app.state, "graph_state", "initializing")
+    core_unavailable = "unavailable" in {database_state, graph_state}
+    if core_unavailable:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     return HealthResponse(
+        status="degraded" if core_unavailable else "ok",
+        database=database_state,
+        graph=graph_state,
         demo_mode=settings.daypilot_demo_mode,
         reasoning_mode=settings.reasoning_mode,
         runtime_state=getattr(request.app.state, "runtime_state", "starting"),

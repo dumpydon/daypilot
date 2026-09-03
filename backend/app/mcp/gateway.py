@@ -51,7 +51,7 @@ class MCPGateway:
             "DAYPILOT_TIMEZONE": settings.daypilot_timezone,
             "PYTHONPATH": str(project_root),
             "PATH": os.getenv("PATH", ""),
-            "DATABASE_URL": settings.database_url,
+            "DATABASE_URL": settings.database_connection_url,
             **runtime_env,
             **settings.mcp_environment(),
         }

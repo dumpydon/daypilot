@@ -4,6 +4,7 @@ import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -30,6 +31,15 @@ class Settings(BaseSettings):
     langsmith_api_key: str | None = None
     langsmith_project: str = "daypilot-local"
     database_url: str = "sqlite:///./data/daypilot.db"
+    database_connect_timeout_seconds: int = Field(
+        default=10,
+        ge=1,
+        le=60,
+        validation_alias=AliasChoices(
+            "DAYPILOT_DATABASE_CONNECT_TIMEOUT_SECONDS",
+            "DATABASE_CONNECT_TIMEOUT_SECONDS",
+        ),
+    )
     daypilot_timezone: str = "Asia/Kolkata"
     daypilot_demo_mode: bool = True
     public_demo_mode: bool = Field(
@@ -184,7 +194,29 @@ class Settings(BaseSettings):
 
     @property
     def database_target(self) -> str | Path:
-        return self.database_url if self.database_is_postgres else self.database_path
+        return self.database_connection_url if self.database_is_postgres else self.database_path
+
+    @property
+    def database_connection_url(self) -> str:
+        """Return the configured URL with a bounded PostgreSQL connect timeout."""
+        if not self.database_is_postgres:
+            return self.database_url
+        parts = urlsplit(self.database_url)
+        if any(
+            item.partition("=")[0].lower() == "connect_timeout"
+            for item in parts.query.split("&")
+            if item
+        ):
+            return self.database_url
+        query = "&".join(
+            item
+            for item in (
+                parts.query,
+                f"connect_timeout={self.database_connect_timeout_seconds}",
+            )
+            if item
+        )
+        return urlunsplit(parts._replace(query=query))
 
     def resolve_path(self, value: str) -> Path:
         path = Path(value).expanduser()
@@ -230,7 +262,7 @@ class Settings(BaseSettings):
     def mcp_environment(self) -> dict[str, str]:
         """Pass non-token provider configuration to the isolated MCP children."""
         values = {
-            "DATABASE_URL": self.database_url,
+            "DATABASE_URL": self.database_connection_url,
             "DAYPILOT_DEMO_MODE": str(self.daypilot_demo_mode).lower(),
             "DAYPILOT_PROVIDER_MODE": self.provider_mode,
             "DAYPILOT_MAIL_PROVIDER": self.configured_provider("mail"),

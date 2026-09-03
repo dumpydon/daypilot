@@ -127,9 +127,9 @@ export interface Preferences {
 }
 
 export interface HealthStatus {
-  status: "ok";
-  database: "connected";
-  graph: "ready";
+  status: "ok" | "degraded";
+  database: "initializing" | "connected" | "unavailable";
+  graph: "initializing" | "ready" | "unavailable";
   demo_mode: boolean;
   reasoning_mode: string;
   runtime_state: RuntimeState;

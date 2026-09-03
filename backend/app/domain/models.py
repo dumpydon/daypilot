@@ -224,9 +224,9 @@ class RuntimeState(StrEnum):
 
 
 class HealthResponse(BaseModel):
-    status: Literal["ok"] = "ok"
-    database: Literal["connected"] = "connected"
-    graph: Literal["ready"] = "ready"
+    status: Literal["ok", "degraded"] = "ok"
+    database: Literal["initializing", "connected", "unavailable"] = "initializing"
+    graph: Literal["initializing", "ready", "unavailable"] = "initializing"
     demo_mode: bool
     reasoning_mode: str
     runtime_state: RuntimeState = RuntimeState.STARTING
