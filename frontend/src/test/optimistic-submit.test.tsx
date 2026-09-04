@@ -81,6 +81,29 @@ describe("optimistic run submission", () => {
     })] }));
   });
 
+  it("shows an expectation hint during real startup without discouraging refresh", () => {
+    api.getReadiness.mockImplementation(() => new Promise(() => undefined));
+
+    render(<DayPilotWorkspace />);
+
+    expect(screen.getByText("DayPilot is waking up and connecting services.")).toBeInTheDocument();
+    expect(screen.getByText("(~100 sec)")).toBeInTheDocument();
+    expect(screen.queryByText(/Do not refresh/i)).not.toBeInTheDocument();
+  });
+
+  it("uses the amber resolving state until workspace hydration finishes", async () => {
+    let resolveTools: ((value: typeof capabilityCatalog) => void) | undefined;
+    api.getTools.mockImplementation(() => new Promise((resolve) => {
+      resolveTools = resolve;
+    }));
+    render(<DayPilotWorkspace />);
+
+    await waitFor(() => expect(screen.getByText("DayPilot is ready; finishing workspace sync.")).toBeInTheDocument());
+    expect(screen.getByText("Finishing workspace sync…")).toBeInTheDocument();
+    resolveTools?.(capabilityCatalog);
+    await waitFor(() => expect(screen.queryByText("DayPilot is ready; finishing workspace sync.")).not.toBeInTheDocument());
+  });
+
   it("moves into a pending run immediately while create-run is slow", async () => {
     let resolveCreate: ((value: { id: string }) => void) | undefined;
     api.createRun.mockImplementation(() => new Promise((resolve) => {

@@ -14,6 +14,7 @@ interface HeaderProps {
   onHome?: () => void;
   active?: boolean;
   readinessState?: "starting" | "ready" | "degraded";
+  workspaceHydrating?: boolean;
   publicDemoMode?: boolean;
   adminAuthenticated?: boolean;
 }
@@ -25,6 +26,7 @@ export function Header({
   onHome,
   active = false,
   readinessState = "ready",
+  workspaceHydrating = false,
   publicDemoMode = false,
   adminAuthenticated = false,
 }: HeaderProps) {
@@ -40,7 +42,19 @@ export function Header({
   );
   const openAIReady = reasoningMode === "openai";
   const waking = readinessState === "starting";
+  const resolvingWorkspace = workspaceHydrating && !waking;
   const publicVisitor = publicDemoMode && !adminAuthenticated;
+  const serverHealthDot = waking
+    ? styles.startupBeacon
+    : resolvingWorkspace
+      ? styles.hydrationPulse
+      : publicVisitor && readinessState === "ready"
+        ? styles.okDot
+        : readinessState === "degraded"
+          ? styles.warnDot
+          : connected === servers.length
+            ? styles.okDot
+            : styles.warnDot;
   return (
     <header className={styles.header}>
       <button className={styles.mobileMenu} onClick={onMenu} aria-label="Open navigation">
@@ -89,8 +103,14 @@ export function Header({
         </span>
         <span className={styles.serverHealth} aria-label={waking ? "MCP servers connecting" : publicVisitor ? "Public demo services ready" : `${connected}/${servers.length} MCP servers`}>
           <Cable size={13} />
-          <i className={waking ? styles.warnDot : publicVisitor && readinessState === "ready" ? styles.okDot : connected === servers.length ? styles.okDot : styles.warnDot} />
-          {waking ? "Connecting services…" : publicVisitor ? readinessState === "ready" ? "Public demo · Web ready" : "Public demo · Limited services" : <><strong>{connected}/{servers.length}</strong> MCP servers</>}
+          <i className={serverHealthDot} />
+          {waking
+            ? "Connecting services…"
+            : resolvingWorkspace
+              ? "Finishing workspace sync…"
+              : publicVisitor
+                ? readinessState === "ready" ? "Public demo · Web ready" : "Public demo · Limited services"
+                : <><strong>{connected}/{servers.length}</strong> MCP servers</>}
         </span>
         <span className={styles.runtimeStack} role="group" aria-label="Runtime status">
           <span>

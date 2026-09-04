@@ -216,8 +216,35 @@ describe("DayPilot operations workspace", () => {
 
     expect(screen.getByText("Waking DayPilot…")).toBeInTheDocument();
     expect(screen.getByText("Connecting services…")).toBeInTheDocument();
+    expect(screen.getByLabelText("MCP servers connecting").querySelector("i")?.className).toContain("startupBeacon");
     expect(screen.queryByText("Demo workspace")).not.toBeInTheDocument();
     expect(screen.queryByText(/0\/6 MCP servers/)).not.toBeInTheDocument();
+  });
+
+  it("distinguishes transient workspace hydration from stable degradation", () => {
+    const view = render(
+      <Header
+        servers={capabilityCatalog.servers}
+        reasoningMode="openai"
+        readinessState="degraded"
+        workspaceHydrating
+        onMenu={vi.fn()}
+      />,
+    );
+    const health = screen.getByLabelText("6/6 MCP servers");
+    expect(health).toHaveTextContent("Finishing workspace sync…");
+    expect(health.querySelector("i")?.className).toContain("hydrationPulse");
+
+    view.rerender(
+      <Header
+        servers={capabilityCatalog.servers}
+        reasoningMode="openai"
+        readinessState="degraded"
+        onMenu={vi.fn()}
+      />,
+    );
+    expect(health.querySelector("i")?.className).toContain("warnDot");
+    expect(health.querySelector("i")?.className).not.toContain("hydrationPulse");
   });
 
   it("marks Mail as used when search_mail succeeds without a thread read", () => {

@@ -63,8 +63,34 @@
 .errorBanner span { flex: 1; }
 .errorBanner button { border: 0; background: transparent; color: #c07f84; cursor: pointer; font-size: 10px; }
 .readinessBanner { min-height: 36px; display: flex; align-items: center; gap: 9px; padding: 0 20px; background: #171c26; border-bottom: 1px solid #2e3e58; color: #a8bce3; font-size: 11px; }
-.readinessBanner i { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; }
-.readinessPulse { background: #75a2fa; box-shadow: 0 0 0 4px #416bad2a; animation: pulse 1.6s ease-in-out infinite; }
+.readinessBanner > span { min-width: 0; }
+.readinessHint { color: #7688aa; font-size: 10px; }
+.readinessBanner i { position: relative; width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; overflow: visible; }
+.startupBeacon { color: #4f82ee; background: currentColor; box-shadow: 0 0 0 3px rgba(79, 130, 238, .16), 0 0 15px 4px rgba(79, 130, 238, .28), 0 0 34px 10px rgba(79, 130, 238, .12); animation: readinessBeacon 3.2s ease-in-out infinite; }
+.runtime i.startupBeacon, .runtime i.hydrationPulse { background: currentColor; box-shadow: 0 0 0 3px rgba(79, 130, 238, .16), 0 0 15px 4px rgba(79, 130, 238, .28), 0 0 34px 10px rgba(79, 130, 238, .12); }
+.startupBeacon::before, .startupBeacon::after { content: ""; position: absolute; top: 50%; left: 50%; border-radius: 50%; pointer-events: none; transform: translate(-50%, -50%); background: radial-gradient(circle, currentColor 0%, transparent 70%); }
+.startupBeacon::before { width: 24px; height: 24px; opacity: .3; animation: readinessBeaconAura 3.2s ease-in-out infinite; }
+.startupBeacon::after { width: 44px; height: 44px; opacity: .14; filter: blur(1px); animation: readinessBeaconAura 3.2s ease-in-out -.35s infinite; }
+@keyframes readinessBeacon {
+  0%, 100% { color: #4f82ee; box-shadow: 0 0 0 3px rgba(79, 130, 238, .16), 0 0 15px 4px rgba(79, 130, 238, .28), 0 0 34px 10px rgba(79, 130, 238, .12); }
+  12.5% { color: #5a91fa; box-shadow: 0 0 0 3px rgba(90, 145, 250, .18), 0 0 18px 5px rgba(90, 145, 250, .3), 0 0 39px 12px rgba(90, 145, 250, .13); }
+  25% { color: #54a0f5; box-shadow: 0 0 0 3px rgba(84, 160, 245, .18), 0 0 20px 5px rgba(84, 160, 245, .3), 0 0 42px 12px rgba(84, 160, 245, .14); }
+  37.5% { color: #55b5ee; box-shadow: 0 0 0 3px rgba(85, 181, 238, .18), 0 0 21px 6px rgba(85, 181, 238, .3), 0 0 44px 13px rgba(85, 181, 238, .14); }
+  50% { color: #55c7dd; box-shadow: 0 0 0 3px rgba(85, 199, 221, .2), 0 0 22px 6px rgba(85, 199, 221, .32), 0 0 46px 14px rgba(85, 199, 221, .15); }
+  62.5% { color: #52cdb9; box-shadow: 0 0 0 3px rgba(82, 205, 185, .2), 0 0 20px 6px rgba(82, 205, 185, .3), 0 0 43px 13px rgba(82, 205, 185, .14); }
+  75% { color: #55c99f; box-shadow: 0 0 0 3px rgba(85, 201, 159, .18), 0 0 18px 5px rgba(85, 201, 159, .28), 0 0 39px 12px rgba(85, 201, 159, .13); }
+  87.5% { color: #5bbca2; box-shadow: 0 0 0 3px rgba(91, 188, 162, .17), 0 0 16px 4px rgba(91, 188, 162, .27), 0 0 36px 10px rgba(91, 188, 162, .12); }
+}
+@keyframes readinessBeaconAura {
+  0%, 100% { transform: translate(-50%, -50%) scale(.72); opacity: .18; }
+  50% { transform: translate(-50%, -50%) scale(1.15); opacity: .42; }
+}
+.hydrationPulse { color: #c28c3c; background: currentColor; box-shadow: 0 0 0 3px rgba(194, 140, 60, .12), 0 0 13px 4px rgba(194, 140, 60, .2); animation: readinessAmberBeacon 2.8s ease-in-out infinite; }
+.runtime i.hydrationPulse { box-shadow: 0 0 0 3px rgba(194, 140, 60, .12), 0 0 13px 4px rgba(194, 140, 60, .2); }
+@keyframes readinessAmberBeacon {
+  0%, 100% { color: #b27d32; box-shadow: 0 0 0 3px rgba(178, 125, 50, .1), 0 0 10px 3px rgba(178, 125, 50, .16); }
+  50% { color: #e0ad59; box-shadow: 0 0 0 3px rgba(224, 173, 89, .15), 0 0 17px 5px rgba(224, 173, 89, .25); }
+}
 .readinessWarn { background: #d3a24d; box-shadow: 0 0 8px #d3a24d44; }
 @keyframes pulse { 50% { opacity: .45; } }
 .requestBar { min-height: 98px; padding: 22px 27px; border-bottom: 1px solid #20242b; display: flex; align-items: flex-end; justify-content: space-between; background: #101216; }
@@ -969,7 +995,9 @@
 
 @media (prefers-reduced-motion: reduce) {
   .rotatingCurrent { transition: none; }
+  .startupBeacon, .startupBeacon::before, .startupBeacon::after, .hydrationPulse,
   .timelineCurrent .timelineTrack > span::after, .runningTrail i, .planSkeleton span, .spin { animation: none; }
+  .startupBeacon::before, .startupBeacon::after { opacity: .2; transform: translate(-50%, -50%) scale(1); }
   .runningTrail { width: 2px; background: #6e98df; opacity: .45; }
   .runningTrail i { display: none; }
   .timelineItem, .jumpLatest, .inspectorOpen .serverGrid, .contextDetails, .summary { transition: none; animation: none; }

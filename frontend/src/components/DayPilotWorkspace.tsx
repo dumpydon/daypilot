@@ -137,6 +137,8 @@ export function DayPilotWorkspace() {
     degraded_services: [],
     message: "DayPilot is waking up and connecting services.",
   });
+  const [workspaceHydrating, setWorkspaceHydrating] = useState(true);
+  const [adminHydrating, setAdminHydrating] = useState(true);
   const [adminStatus, setAdminStatus] = useState<AdminStatus>({
     authenticated: false,
     public_demo_mode: false,
@@ -156,6 +158,7 @@ export function DayPilotWorkspace() {
   const maintenanceBlockMessage = hasProcessingRun || hasPendingApproval
     ? "Finish or reject active or approval-required runs before changing demo data or clearing history."
     : null;
+  const workspaceResolving = workspaceHydrating || adminHydrating;
 
   useEffect(() => {
     if (!hydrated) return;
@@ -190,51 +193,56 @@ export function DayPilotWorkspace() {
   useEffect(() => {
     let cancelled = false;
     async function loadWorkspace() {
-      let current: ReadinessStatus | null = null;
-      let attempt = 0;
-      while (!cancelled) {
-        try {
-          current = await getReadiness();
-          if (!cancelled) setReadiness(current);
-          if (current.state !== "starting") break;
-        } catch {
-          current = {
-            state: "starting",
-            mcp_servers_ready: 0,
-            mcp_servers_total: 6,
-            degraded_services: [],
-            message: "DayPilot is waking up and connecting services.",
-          };
-          if (!cancelled) setReadiness(current);
+      try {
+        let current: ReadinessStatus | null = null;
+        let attempt = 0;
+        while (!cancelled) {
+          try {
+            current = await getReadiness();
+            if (!cancelled) setReadiness(current);
+            if (current.state !== "starting") break;
+          } catch {
+            current = {
+              state: "starting",
+              mcp_servers_ready: 0,
+              mcp_servers_total: 6,
+              degraded_services: [],
+              message: "DayPilot is waking up and connecting services.",
+            };
+            if (!cancelled) setReadiness(current);
+          }
+          attempt += 1;
+          await delay(Math.min(500 + attempt * 50, 2_000));
         }
-        attempt += 1;
-        await delay(Math.min(500 + attempt * 50, 2_000));
-      }
-      if (cancelled || !current || current.state === "starting") return;
-      try {
-        const health = await getHealth();
-        if (!cancelled) setRuntimeMode(health.reasoning_mode);
-      } catch {
-        if (!cancelled) setRuntimeMode("unavailable");
-      }
-      try {
-        const [nextCatalog, nextPreferences, nextRuns, nextConnections, nextFileRoots] = await Promise.all([
-          getTools(), getPreferences(), listRuns(), getConnections(), listFileRoots(),
-        ]);
-        if (cancelled) return;
-        setCatalog(nextCatalog);
-        setPreferences(nextPreferences);
-        setRuns(nextRuns);
-        setConnections(nextConnections);
-        setFileRoots(nextFileRoots);
-      } catch (cause) {
-        if (!cancelled) setError(messageFrom(cause));
+        if (cancelled || !current || current.state === "starting") return;
+        try {
+          const health = await getHealth();
+          if (!cancelled) setRuntimeMode(health.reasoning_mode);
+        } catch {
+          if (!cancelled) setRuntimeMode("unavailable");
+        }
+        try {
+          const [nextCatalog, nextPreferences, nextRuns, nextConnections, nextFileRoots] = await Promise.all([
+            getTools(), getPreferences(), listRuns(), getConnections(), listFileRoots(),
+          ]);
+          if (cancelled) return;
+          setCatalog(nextCatalog);
+          setPreferences(nextPreferences);
+          setRuns(nextRuns);
+          setConnections(nextConnections);
+          setFileRoots(nextFileRoots);
+        } catch (cause) {
+          if (!cancelled) setError(messageFrom(cause));
+        }
+      } finally {
+        if (!cancelled) setWorkspaceHydrating(false);
       }
     }
     void loadWorkspace();
     void getAdminStatus()
       .then((status) => { if (!cancelled) setAdminStatus(status); })
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => { if (!cancelled) setAdminHydrating(false); });
     return () => { cancelled = true; };
   }, []);
 
@@ -387,43 +395,58 @@ export function DayPilotWorkspace() {
   }
 
   async function refreshConnections() {
-    const [nextConnections, nextFileRoots, nextCatalog] = await Promise.all([
-      getConnections(),
-      listFileRoots(),
-      getTools(),
-    ]);
-    setConnections(nextConnections);
-    setFileRoots(nextFileRoots);
-    setCatalog(nextCatalog);
+    setWorkspaceHydrating(true);
+    try {
+      const [nextConnections, nextFileRoots, nextCatalog] = await Promise.all([
+        getConnections(),
+        listFileRoots(),
+        getTools(),
+      ]);
+      setConnections(nextConnections);
+      setFileRoots(nextFileRoots);
+      setCatalog(nextCatalog);
+    } finally {
+      setWorkspaceHydrating(false);
+    }
   }
 
   async function unlockAdmin(accessCode: string) {
-    const status = await adminLogin(accessCode);
-    setAdminStatus(status);
-    const [nextCatalog, nextConnections, nextPreferences, nextRuns, nextFileRoots] = await Promise.all([
-      getTools(), getConnections(), getPreferences(), listRuns(), listFileRoots(),
-    ]);
-    setCatalog(nextCatalog);
-    setConnections(nextConnections);
-    setPreferences(nextPreferences);
-    setRuns(nextRuns);
-    setFileRoots(nextFileRoots);
-    setNotice("Admin mode enabled.");
+    setWorkspaceHydrating(true);
+    try {
+      const status = await adminLogin(accessCode);
+      setAdminStatus(status);
+      const [nextCatalog, nextConnections, nextPreferences, nextRuns, nextFileRoots] = await Promise.all([
+        getTools(), getConnections(), getPreferences(), listRuns(), listFileRoots(),
+      ]);
+      setCatalog(nextCatalog);
+      setConnections(nextConnections);
+      setPreferences(nextPreferences);
+      setRuns(nextRuns);
+      setFileRoots(nextFileRoots);
+      setNotice("Admin mode enabled.");
+    } finally {
+      setWorkspaceHydrating(false);
+    }
   }
 
   async function lockAdmin() {
-    const status = await adminLogout();
-    setAdminStatus(status);
-    const [nextCatalog, nextConnections, nextPreferences, nextRuns, nextFileRoots] = await Promise.all([
-      getTools(), getConnections(), getPreferences(), listRuns(), listFileRoots(),
-    ]);
-    setCatalog(nextCatalog);
-    setConnections(nextConnections);
-    setPreferences(nextPreferences);
-    setRuns(nextRuns);
-    setFileRoots(nextFileRoots);
-    setActiveRun(null);
-    setNotice("Admin mode locked.");
+    setWorkspaceHydrating(true);
+    try {
+      const status = await adminLogout();
+      setAdminStatus(status);
+      const [nextCatalog, nextConnections, nextPreferences, nextRuns, nextFileRoots] = await Promise.all([
+        getTools(), getConnections(), getPreferences(), listRuns(), listFileRoots(),
+      ]);
+      setCatalog(nextCatalog);
+      setConnections(nextConnections);
+      setPreferences(nextPreferences);
+      setRuns(nextRuns);
+      setFileRoots(nextFileRoots);
+      setActiveRun(null);
+      setNotice("Admin mode locked.");
+    } finally {
+      setWorkspaceHydrating(false);
+    }
   }
 
   async function connectGoogle() {
@@ -473,10 +496,15 @@ export function DayPilotWorkspace() {
     try {
       if (maintenanceAction === "reset") {
         await resetDemoWorkspace();
-        const [nextCatalog, nextRuns] = await Promise.all([getTools(), listRuns()]);
-        setCatalog(nextCatalog);
-        setRuns(nextRuns);
-        setNotice("Demo workspace restored.");
+        setWorkspaceHydrating(true);
+        try {
+          const [nextCatalog, nextRuns] = await Promise.all([getTools(), listRuns()]);
+          setCatalog(nextCatalog);
+          setRuns(nextRuns);
+          setNotice("Demo workspace restored.");
+        } finally {
+          setWorkspaceHydrating(false);
+        }
       } else {
         await clearRunHistory();
         setRuns([]);
@@ -524,6 +552,7 @@ export function DayPilotWorkspace() {
           servers={catalog.servers}
           reasoningMode={reasoningMode}
           readinessState={readiness.state}
+          workspaceHydrating={workspaceResolving}
           publicDemoMode={adminStatus.public_demo_mode}
           adminAuthenticated={adminStatus.authenticated}
           active={busy || Boolean(activeRun && ["queued", "running", "resuming"].includes(activeRun.status))}
@@ -549,10 +578,16 @@ export function DayPilotWorkspace() {
           />
           <section className={`${styles.workspace} ${activeRun ? styles.workspaceActive : ""}`}>
             {error && <div className={styles.errorBanner}><AlertTriangle size={14} /><span>{error}</span><button onClick={() => setError(null)}>Dismiss</button></div>}
-            {readiness.state !== "ready" && (
+            {(readiness.state !== "ready" || workspaceResolving) && (
               <div className={styles.readinessBanner} role="status">
-                <i className={readiness.state === "starting" ? styles.readinessPulse : styles.readinessWarn} />
-                <span>{readiness.message}</span>
+                <i className={readiness.state === "starting" ? styles.startupBeacon : workspaceResolving ? styles.hydrationPulse : styles.readinessWarn} />
+                <span>
+                  {readiness.state === "starting"
+                    ? <>{readiness.message} <small className={styles.readinessHint}>(~100 sec)</small></>
+                    : workspaceResolving
+                      ? "DayPilot is ready; finishing workspace sync."
+                      : readiness.message}
+                </span>
               </div>
             )}
             {!activeRun ? (
