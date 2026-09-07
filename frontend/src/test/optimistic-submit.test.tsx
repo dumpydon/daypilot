@@ -13,6 +13,8 @@ const api = vi.hoisted(() => ({
   listFileRoots: vi.fn(),
   createRun: vi.fn(),
   getRun: vi.fn(),
+  adminLogin: vi.fn(),
+  savePreferences: vi.fn(),
 }));
 
 vi.mock("@/lib/api", () => ({ API_URL: "http://daypilot.test", ...api }));
@@ -79,6 +81,50 @@ describe("optimistic run submission", () => {
       state: "completed",
       title: "Request received",
     })] }));
+  });
+
+  it("finishes admin authentication before service refresh and never saves preferences", async () => {
+    api.getAdminStatus.mockResolvedValue({ authenticated: false, public_demo_mode: true });
+    let authenticate!: (value: unknown) => void;
+    let refresh!: (value: unknown) => void;
+    api.adminLogin.mockImplementation(() => new Promise((resolve) => { authenticate = resolve; }));
+    render(<DayPilotWorkspace />);
+    await waitFor(() => expect(api.getTools).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Open preferences" }));
+    const password = screen.getByLabelText("Admin access code");
+    fireEvent.change(password, { target: { value: "test-code" } });
+    fireEvent.keyDown(password, { key: "Enter" });
+    fireEvent.keyDown(password, { key: "Enter" });
+    expect(api.adminLogin).toHaveBeenCalledTimes(1);
+    expect(password).toBeDisabled();
+    expect(screen.getByText("Verifying admin access…")).toBeInTheDocument();
+    api.getConnections.mockImplementationOnce(() => new Promise((resolve) => { refresh = resolve; }));
+    authenticate({ authenticated: true, public_demo_mode: true });
+    await waitFor(() => expect(screen.getByText("Personal services are now available for this browser.")).toBeInTheDocument());
+    expect(screen.queryByLabelText("Admin access code")).not.toBeInTheDocument();
+    expect(screen.queryByText("Unlocking…")).not.toBeInTheDocument();
+    expect(screen.getByText("Refreshing connected services…")).toBeInTheDocument();
+    refresh({ demo_mode: false, connections: [] });
+    await waitFor(() => expect(screen.queryByText("Refreshing connected services…")).not.toBeInTheDocument());
+    expect(api.savePreferences).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByLabelText("Close preferences"));
+    fireEvent.click(screen.getByLabelText("Open preferences"));
+    expect(screen.queryByLabelText("Admin access code")).not.toBeInTheDocument();
+  });
+
+  it("allows retry after failed admin authentication without saving settings", async () => {
+    api.getAdminStatus.mockResolvedValue({ authenticated: false, public_demo_mode: true });
+    api.adminLogin.mockRejectedValue(new Error("Invalid access code."));
+    render(<DayPilotWorkspace />);
+    await waitFor(() => expect(api.getTools).toHaveBeenCalled());
+    fireEvent.click(screen.getByLabelText("Open preferences"));
+    const password = screen.getByLabelText("Admin access code");
+    fireEvent.change(password, { target: { value: "wrong-code" } });
+    fireEvent.click(screen.getByRole("button", { name: "Unlock" }));
+    await screen.findByText("Invalid access code.");
+    expect(password).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Unlock" })).toBeEnabled();
+    expect(api.savePreferences).not.toHaveBeenCalled();
   });
 
   it("shows an expectation hint during real startup without discouraging refresh", () => {

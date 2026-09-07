@@ -1,5 +1,5 @@
-import { Clock3, Database, History, KeyRound, LockKeyhole, X } from "lucide-react";
-import { FormEvent, useState } from "react";
+import { Check, Clock3, Database, Eye, EyeOff, History, KeyRound, LoaderCircle, X } from "lucide-react";
+import { FormEvent, useRef, useState } from "react";
 
 import type { AdminStatus, ConnectionCatalog, FileRoot, Preferences } from "@/lib/types";
 
@@ -18,6 +18,9 @@ interface PreferencesDialogProps {
   adminStatus?: AdminStatus;
   onAdminLogin?: (accessCode: string) => Promise<void>;
   onAdminLogout?: () => Promise<void>;
+  servicesLoading?: boolean;
+  servicesError?: string | null;
+  onRetryServices?: () => Promise<void>;
   connections?: ConnectionCatalog;
   fileRoots?: FileRoot[];
   onConnectGoogle?: () => Promise<void>;
@@ -40,6 +43,9 @@ export function PreferencesDialog({
   adminStatus,
   onAdminLogin = noopAdminLogin,
   onAdminLogout = noopAdminLogout,
+  servicesLoading = false,
+  servicesError = null,
+  onRetryServices = noopAsync,
   connections,
   fileRoots = [],
   onConnectGoogle = noopAsync,
@@ -52,7 +58,9 @@ export function PreferencesDialog({
   const [draft, setDraft] = useState(preferences);
   const [busy, setBusy] = useState(false);
   const [accessCode, setAccessCode] = useState("");
+  const [showAccessCode, setShowAccessCode] = useState(false);
   const [adminBusy, setAdminBusy] = useState(false);
+  const adminInFlight = useRef(false);
   const [adminError, setAdminError] = useState<string | null>(null);
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -60,7 +68,9 @@ export function PreferencesDialog({
     try { await onSave(draft); onClose(); } finally { setBusy(false); }
   }
   async function login() {
-    if (!accessCode.trim() || adminBusy) return;
+    if (!accessCode.trim() || adminInFlight.current) return;
+    adminInFlight.current = true;
+    setShowAccessCode(false);
     setAdminBusy(true);
     setAdminError(null);
     try {
@@ -69,6 +79,7 @@ export function PreferencesDialog({
     } catch (cause) {
       setAdminError(cause instanceof Error ? cause.message : "Admin access could not be enabled.");
     } finally {
+      adminInFlight.current = false;
       setAdminBusy(false);
     }
   }
@@ -93,7 +104,12 @@ export function PreferencesDialog({
         <label>Default focus block <span>{draft.preferred_focus_block_minutes} minutes</span><input type="range" min="30" max="180" step="15" value={draft.preferred_focus_block_minutes} onChange={(event) => setDraft({ ...draft, preferred_focus_block_minutes: Number(event.target.value) })} /></label>
         <label>Avoid scheduling after<input type="time" value={draft.avoid_scheduling_after} onChange={(event) => setDraft({ ...draft, avoid_scheduling_after: event.target.value })} /></label>
         <label>Preferred task due time<input type="time" value={draft.preferred_task_due_time} onChange={(event) => setDraft({ ...draft, preferred_task_due_time: event.target.value })} /></label>
-        {connections && (
+        {servicesLoading || servicesError ? (
+          <section className={styles.connectionSettings} aria-label="Connected services">
+            <strong>Connected services</strong>
+            {servicesLoading ? <p role="status"><LoaderCircle size={14} className={styles.spin} aria-hidden="true" /> Refreshing connected services…</p> : <><p className={styles.connectionError} role="alert">{servicesError}</p><button type="button" className={styles.secondaryButton} onClick={() => void onRetryServices()}>Retry refresh</button></>}
+          </section>
+        ) : connections && (
           <ConnectionSettings
             catalog={connections}
             fileRoots={fileRoots}
@@ -108,16 +124,21 @@ export function PreferencesDialog({
         )}
         {publicDemoMode && (
           <div className={styles.settingsSection}>
-            <div className={styles.settingsSectionHeader}>
-              {authenticated ? <LockKeyhole size={14} /> : <KeyRound size={14} />}
-              <div><strong>Admin access</strong><p>{authenticated ? "Personal services are enabled in this browser session." : "Unlock personal services for this browser only."}</p></div>
+            <div className={`${styles.settingsSectionHeader} ${authenticated ? styles.adminEnabled : ""}`} role="status">
+              {authenticated ? <Check size={14} /> : <KeyRound size={14} />}
+              <div><strong>{authenticated ? "Admin mode enabled" : "Admin access"}</strong><p>{authenticated ? "Personal services are now available for this browser." : adminBusy ? "Verifying admin access…" : "Unlock personal services for this browser."}</p></div>
             </div>
             {authenticated ? (
               <button className={styles.secondaryButton} type="button" onClick={logout} disabled={adminBusy}>Lock admin mode</button>
             ) : (
               <div className={styles.adminAccessRow}>
-                <input type="password" aria-label="Admin access code" value={accessCode} onChange={(event) => setAccessCode(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void login(); } }} placeholder="Access code" autoComplete="off" />
-                <button className={styles.secondaryButton} type="button" onClick={login} disabled={adminBusy || !accessCode.trim()}>{adminBusy ? "Unlocking…" : "Unlock"}</button>
+                <div className={styles.adminPasswordField}>
+                  <input type={showAccessCode ? "text" : "password"} aria-label="Admin access code" disabled={adminBusy} value={accessCode} onChange={(event) => setAccessCode(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); if (!event.nativeEvent.isComposing) void login(); } }} placeholder="Access code" autoComplete="off" />
+                  <button type="button" className={styles.adminPasswordToggle} disabled={adminBusy} aria-label={showAccessCode ? "Hide password" : "Show password"} title={showAccessCode ? "Hide password" : "Show password"} onClick={() => setShowAccessCode((shown) => !shown)}>
+                    {showAccessCode ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}
+                  </button>
+                </div>
+                <button className={styles.secondaryButton} type="button" onClick={login} disabled={adminBusy || !accessCode.trim()} aria-busy={adminBusy}>{adminBusy ? <><LoaderCircle size={13} className={styles.spin} aria-hidden="true" /> Unlocking…</> : "Unlock"}</button>
               </div>
             )}
             {adminError && <p className={styles.connectionError} role="alert">{adminError}</p>}

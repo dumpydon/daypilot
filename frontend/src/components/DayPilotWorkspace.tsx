@@ -139,6 +139,9 @@ export function DayPilotWorkspace() {
   });
   const [workspaceHydrating, setWorkspaceHydrating] = useState(true);
   const [adminHydrating, setAdminHydrating] = useState(true);
+  const [adminServicesLoading, setAdminServicesLoading] = useState(false);
+  const [adminServicesError, setAdminServicesError] = useState<string | null>(null);
+  const adminRefreshGeneration = useRef(0);
   const [adminStatus, setAdminStatus] = useState<AdminStatus>({
     authenticated: false,
     public_demo_mode: false,
@@ -411,25 +414,43 @@ export function DayPilotWorkspace() {
   }
 
   async function unlockAdmin(accessCode: string) {
+    const status = await adminLogin(accessCode);
+    setAdminStatus(status);
+    setNotice("Admin mode enabled.");
+    void refreshAdminWorkspace();
+  }
+
+  async function refreshAdminWorkspace() {
+    const generation = ++adminRefreshGeneration.current;
+    setAdminServicesLoading(true);
+    setAdminServicesError(null);
     setWorkspaceHydrating(true);
     try {
-      const status = await adminLogin(accessCode);
-      setAdminStatus(status);
       const [nextCatalog, nextConnections, nextPreferences, nextRuns, nextFileRoots] = await Promise.all([
         getTools(), getConnections(), getPreferences(), listRuns(), listFileRoots(),
       ]);
+      if (generation !== adminRefreshGeneration.current) return;
       setCatalog(nextCatalog);
       setConnections(nextConnections);
       setPreferences(nextPreferences);
       setRuns(nextRuns);
       setFileRoots(nextFileRoots);
-      setNotice("Admin mode enabled.");
+    } catch {
+      if (generation === adminRefreshGeneration.current) {
+        setAdminServicesError("Admin mode is enabled, but connected services could not refresh. Try again.");
+      }
     } finally {
-      setWorkspaceHydrating(false);
+      if (generation === adminRefreshGeneration.current) {
+        setAdminServicesLoading(false);
+        setWorkspaceHydrating(false);
+      }
     }
   }
 
   async function lockAdmin() {
+    ++adminRefreshGeneration.current;
+    setAdminServicesLoading(false);
+    setAdminServicesError(null);
     setWorkspaceHydrating(true);
     try {
       const status = await adminLogout();
@@ -677,6 +698,9 @@ export function DayPilotWorkspace() {
             adminStatus={adminStatus}
             onAdminLogin={unlockAdmin}
             onAdminLogout={lockAdmin}
+            servicesLoading={adminServicesLoading}
+            servicesError={adminServicesError}
+            onRetryServices={refreshAdminWorkspace}
             connections={connections}
             fileRoots={fileRoots}
             onConnectGoogle={connectGoogle}
