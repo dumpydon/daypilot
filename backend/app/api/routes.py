@@ -32,6 +32,7 @@ from backend.app.persistence.repository import DayPilotRepository
 from backend.app.services.access import PUBLIC_PERSONAL_MESSAGE, requires_personal_access
 from backend.app.services.admin_auth import ADMIN_COOKIE_NAME, AdminAuthService
 from backend.app.services.coordinator import TERMINAL_STATUSES, RunCoordinator
+from backend.app.timing import timed
 
 router = APIRouter()
 
@@ -362,8 +363,10 @@ async def list_runs(
 @router.get("/api/runs/{run_id}", response_model=RunDetail)
 async def get_run(run_id: str, request: Request) -> RunDetail:
     coordinator, _, _, _ = _services(request)
-    await _require_run_access(request, run_id)
-    return await coordinator.get_detail(run_id)
+    with timed("history.access_check"):
+        await _require_run_access(request, run_id)
+    with timed("history.detail_load"):
+        return await coordinator.get_detail(run_id)
 
 
 @router.post("/api/runs/{run_id}/approve", response_model=RunAccepted)

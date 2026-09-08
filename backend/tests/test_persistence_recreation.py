@@ -4,6 +4,8 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -19,6 +21,39 @@ from backend.app.services.coordinator import RunCoordinator
 from backend.app.services.planner import PlanBuilder
 from backend.app.services.reasoner import DeterministicReasoner
 from mcp_servers.common.database import initialize_demo_database
+
+
+@pytest.mark.asyncio
+async def test_history_reads_checkpoint_and_timeline_concurrently_without_duplicate_run_read(
+    tmp_path, monkeypatch
+):
+    repo = DayPilotRepository(tmp_path / "history.db")
+    await repo.initialize()
+    await repo.create_run("history", "history-thread", "Saved request")
+    await repo.append_event("history", "request_received", EventState.COMPLETED, "Request received")
+    await repo.finish_run("history", "Saved answer")
+    original_events = repo.list_events
+    checkpoint_started, events_started = asyncio.Event(), asyncio.Event()
+
+    async def checkpoint(_config):
+        checkpoint_started.set()
+        await events_started.wait()
+        return SimpleNamespace(values={}, interrupts=())
+
+    async def events(*args, **kwargs):
+        events_started.set()
+        await checkpoint_started.wait()
+        return await original_events(*args, **kwargs)
+
+    run_read = AsyncMock(wraps=repo.get_run)
+    monkeypatch.setattr(repo, "get_run", run_read)
+    monkeypatch.setattr(repo, "list_events", events)
+    coordinator = RunCoordinator(SimpleNamespace(aget_state=checkpoint), repo, None)
+    async with asyncio.timeout(2):
+        detail = await coordinator.get_detail("history")
+    assert run_read.await_count == 1
+    assert detail.final_summary == "Saved answer"
+    assert detail.events[0].title == "Request received"
 
 
 @pytest.mark.asyncio

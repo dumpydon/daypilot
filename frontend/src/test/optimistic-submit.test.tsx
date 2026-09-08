@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -24,9 +24,11 @@ import { DayPilotWorkspace } from "@/components/DayPilotWorkspace";
 import { capabilityCatalog, makeEvent, makeRun } from "./factories";
 
 class FakeEventSource {
+  constructor() { streamOpened(); }
   addEventListener = vi.fn();
   close = vi.fn();
 }
+const streamOpened = vi.fn();
 
 const ready = {
   state: "ready" as const,
@@ -135,6 +137,69 @@ describe("optimistic run submission", () => {
     expect(screen.getByText("DayPilot is waking up and connecting services.")).toBeInTheDocument();
     expect(screen.getByText("(~100 sec)")).toBeInTheDocument();
     expect(screen.queryByText(/Do not refresh/i)).not.toBeInTheDocument();
+  });
+
+  it("acknowledges the selected history run immediately and ignores out-of-order responses", async () => {
+    const one = makeRun({ id: "run-one", user_request: "First saved request", status: "completed", final_summary: "First result" });
+    const two = makeRun({ id: "run-two", user_request: "Second saved request", status: "completed", final_summary: "Second result" });
+    api.listRuns.mockResolvedValue([one, two]);
+    let resolveOne!: (value: typeof one) => void;
+    let resolveTwo!: (value: typeof two) => void;
+    api.getRun.mockImplementation((id: string) => new Promise((resolve) => {
+      if (id === one.id) resolveOne = resolve;
+      else resolveTwo = resolve;
+    }));
+    render(<DayPilotWorkspace />);
+    fireEvent.click(await screen.findByRole("button", { name: /First saved request/ }));
+    expect(screen.getByRole("heading", { name: one.user_request })).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Loading saved run details…");
+    fireEvent.click(screen.getByRole("button", { name: /Second saved request/ }));
+    expect(screen.getByRole("heading", { name: two.user_request })).toBeInTheDocument();
+    await act(async () => resolveOne(one));
+    expect(screen.queryByText("First result")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: two.user_request })).toBeInTheDocument();
+    await act(async () => resolveTwo(two));
+    expect(screen.getByText("Second result")).toBeInTheDocument();
+    expect(streamOpened).not.toHaveBeenCalled();
+    expect(screen.queryByText("Loading saved run details…")).not.toBeInTheDocument();
+  });
+
+  it("does not reopen a history run when its response arrives after returning home", async () => {
+    const saved = makeRun({ user_request: "Saved history request" });
+    api.listRuns.mockResolvedValue([saved]);
+    let finish!: (value: typeof saved) => void;
+    api.getRun.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    render(<DayPilotWorkspace />);
+    fireEvent.click(await screen.findByRole("button", { name: /Saved history request/ }));
+    fireEvent.click(screen.getByRole("link", { name: "DayPilot home" }));
+    await act(async () => finish(saved));
+    expect(screen.getByRole("textbox", { name: "Goal" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: saved.user_request })).not.toBeInTheDocument();
+  });
+
+  it("ignores an older run refresh while opening another run and recovers from a load failure", async () => {
+    const one = makeRun({ id: "run-one", user_request: "First saved request", status: "completed", final_summary: "First result" });
+    const two = makeRun({ id: "run-two", user_request: "Second saved request" });
+    api.listRuns.mockResolvedValue([one, two]);
+    api.getRun.mockResolvedValueOnce(one);
+    render(<DayPilotWorkspace />);
+    fireEvent.click(await screen.findByRole("button", { name: /First saved request/ }));
+    await screen.findByText("First result");
+    let oldRefresh!: (value: typeof one) => void;
+    let rejectNew!: (error: Error) => void;
+    api.getRun.mockImplementationOnce(() => new Promise((resolve) => { oldRefresh = resolve; }));
+    fireEvent.click(screen.getByLabelText("Refresh run"));
+    api.getRun.mockImplementationOnce(() => new Promise((_, reject) => { rejectNew = reject; }));
+    fireEvent.click(screen.getByRole("button", { name: /Second saved request/ }));
+    await act(async () => oldRefresh(one));
+    expect(screen.queryByText("First result")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: two.user_request })).toBeInTheDocument();
+    await act(async () => rejectNew(new Error("Unable to load saved run.")));
+    expect(screen.getByText("Unable to load saved run.")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Opening saved run")).not.toBeInTheDocument();
+    api.getRun.mockResolvedValueOnce(one);
+    fireEvent.click(screen.getByRole("button", { name: /First saved request/ }));
+    await screen.findByText("First result");
   });
 
   it("uses the amber resolving state until workspace hydration finishes", async () => {

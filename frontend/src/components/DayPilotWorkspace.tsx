@@ -104,6 +104,8 @@ export function DayPilotWorkspace() {
   const [preferences, setPreferences] = useState<Preferences>(defaultPreferences);
   const [runs, setRuns] = useState<RunRecord[]>([]);
   const [activeRun, setActiveRun] = useState<RunDetail | null>(null);
+  const [openingRun, setOpeningRun] = useState<{ id: string; title: string } | null>(null);
+  const selectedRunRef = useRef<string | null>(null);
   const [draftGoal, setDraftGoal] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -181,9 +183,15 @@ export function DayPilotWorkspace() {
 
   const refreshRuns = useCallback(async () => setRuns(await listRuns()), []);
   const refreshActive = useCallback(async (runId: string) => {
+    if (selectedRunRef.current !== runId) return;
     const viewGeneration = submitGenerationRef.current;
-    const detail = await getRun(runId);
-    if (viewGeneration !== submitGenerationRef.current) return detail;
+    let detail: RunDetail;
+    try { detail = await getRun(runId); }
+    catch (cause) {
+      if (viewGeneration !== submitGenerationRef.current || selectedRunRef.current !== runId) return;
+      throw cause;
+    }
+    if (viewGeneration !== submitGenerationRef.current || selectedRunRef.current !== runId) return;
     setActiveRun(detail);
     setRuns((current) => {
       const summary: RunRecord = detail;
@@ -266,8 +274,9 @@ export function DayPilotWorkspace() {
     window.history.replaceState({}, "", window.location.pathname);
   }, []);
 
+  const activeRunSettled = Boolean(activeRun && ["completed", "failed", "rejected"].includes(activeRun.status));
   useEffect(() => {
-    if (!activeRun?.id || activeRun.id === OPTIMISTIC_RUN_ID) return;
+    if (!activeRun?.id || activeRun.id === OPTIMISTIC_RUN_ID || activeRunSettled) return;
     const runId = activeRun.id;
     const streamTiming = startTiming("sse-stream");
     const source = new EventSource(`${API_URL}/api/runs/${runId}/events`, { withCredentials: true });
@@ -288,7 +297,7 @@ export function DayPilotWorkspace() {
       source.close();
       if (refreshTimer) clearTimeout(refreshTimer);
     };
-  }, [activeRun?.id, refreshActive]);
+  }, [activeRun?.id, activeRunSettled, refreshActive]);
 
   useEffect(() => {
     if (
@@ -305,7 +314,7 @@ export function DayPilotWorkspace() {
   const reasoningMode = activeRun?.reasoning_mode && activeRun.reasoning_mode !== "pending"
     ? activeRun.reasoning_mode
     : runtimeMode;
-  const activeId = activeRun?.id ?? null;
+  const activeId = openingRun?.id ?? activeRun?.id ?? null;
   const isOptimisticRun = activeRun?.id === OPTIMISTIC_RUN_ID;
   const shortId = useMemo(() => activeId?.replace("run-", "").slice(0, 6).toUpperCase(), [activeId]);
   const presentedStatus = activeRun ? presentationStatus(activeRun) : null;
@@ -319,6 +328,8 @@ export function DayPilotWorkspace() {
     submitInFlightRef.current = true;
     const generation = submitGenerationRef.current + 1;
     submitGenerationRef.current = generation;
+    selectedRunRef.current = null;
+    setOpeningRun(null);
     setBusy(true);
     setError(null);
     setDraftGoal(goal);
@@ -334,6 +345,7 @@ export function DayPilotWorkspace() {
       }
       if (!detail) throw new Error("The run started but its persisted state is not readable yet.");
       if (generation !== submitGenerationRef.current) return;
+      selectedRunRef.current = detail.id;
       setActiveRun(detail);
       realRunBound = true;
       setDraftGoal("");
@@ -352,6 +364,8 @@ export function DayPilotWorkspace() {
 
   const handleHome = useCallback(() => {
     submitGenerationRef.current += 1;
+    selectedRunRef.current = null;
+    setOpeningRun(null);
     setActiveRun(null);
     setDraftGoal("");
     setError(null);
@@ -359,36 +373,50 @@ export function DayPilotWorkspace() {
   }, []);
 
   async function selectRun(runId: string) {
+    const generation = ++submitGenerationRef.current;
+    selectedRunRef.current = runId;
+    setOpeningRun({ id: runId, title: runs.find((run) => run.id === runId)?.user_request ?? "Saved run" });
+    setActiveRun(null);
+    setBusy(false);
+    setMobileSidebarOpen(false);
     setError(null);
-    try { await refreshActive(runId); } catch (cause) { setError(messageFrom(cause)); }
+    try { await refreshActive(runId); }
+    catch (cause) {
+      if (generation === submitGenerationRef.current) setError(messageFrom(cause));
+    } finally {
+      if (generation === submitGenerationRef.current) setOpeningRun(null);
+    }
   }
 
   async function decide(decision: "approve" | "reject") {
     if (!activeRun) return;
+    const generation = submitGenerationRef.current;
     setBusy(true);
     setError(null);
     try {
       await decideRun(activeRun.id, decision);
       await refreshActive(activeRun.id);
     } catch (cause) {
-      setError(messageFrom(cause));
+      if (generation === submitGenerationRef.current) setError(messageFrom(cause));
     } finally {
-      setBusy(false);
+      if (generation === submitGenerationRef.current) setBusy(false);
     }
   }
 
   async function revise(feedback: string) {
     if (!activeRun) return;
+    const generation = submitGenerationRef.current;
     setBusy(true);
     setError(null);
     try {
       const revised = await editRun(activeRun.id, feedback, activeRun.plan_revision);
+      if (generation !== submitGenerationRef.current) return;
       setActiveRun(revised);
       await refreshRuns();
     } catch (cause) {
-      setError(messageFrom(cause));
+      if (generation === submitGenerationRef.current) setError(messageFrom(cause));
     } finally {
-      setBusy(false);
+      if (generation === submitGenerationRef.current) setBusy(false);
     }
   }
 
@@ -597,7 +625,7 @@ export function DayPilotWorkspace() {
             onCloseMobile={() => setMobileSidebarOpen(false)}
             onWidthChange={setSidebarWidthOverride}
           />
-          <section className={`${styles.workspace} ${activeRun ? styles.workspaceActive : ""}`}>
+          <section className={`${styles.workspace} ${activeRun || openingRun ? styles.workspaceActive : ""}`}>
             {error && <div className={styles.errorBanner}><AlertTriangle size={14} /><span>{error}</span><button onClick={() => setError(null)}>Dismiss</button></div>}
             {(readiness.state !== "ready" || workspaceResolving) && (
               <div className={styles.readinessBanner} role="status">
@@ -611,7 +639,23 @@ export function DayPilotWorkspace() {
                 </span>
               </div>
             )}
-            {!activeRun ? (
+            {openingRun ? (
+              <>
+                <div className={styles.requestBar}>
+                  <div className={styles.requestCopy}>
+                    <span className={styles.eyebrow}>Active request</span>
+                    <h1>{openingRun.title}</h1>
+                  </div>
+                </div>
+                <div className={styles.grid} aria-busy="true" aria-label="Opening saved run">
+                  <section className={styles.planPanel}>
+                    <div className={styles.sectionHeader}><div><span className={styles.eyebrow}>Run result</span><h2>Opening run…</h2></div></div>
+                    <div className={styles.planSkeleton} role="status"><p><i />Loading saved run details…</p><div aria-hidden="true"><span /><span /><span /></div></div>
+                  </section>
+                  <aside className={styles.timelinePanel}><div className={styles.timelineTitle}><span>Activity</span><h2>Live timeline</h2></div><p className={styles.emptyTimeline}>Loading saved activity…</p></aside>
+                </div>
+              </>
+            ) : !activeRun ? (
               <div className={styles.startView}>
                 <RequestComposer
                   onSubmit={start}

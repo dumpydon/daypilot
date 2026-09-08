@@ -735,8 +735,11 @@ class DayPilotRepository:
             created_at=datetime.fromisoformat(timestamp),
         )
 
-    async def list_events(self, run_id: str, after_id: int = 0) -> list[TimelineEvent]:
-        await self.get_run(run_id)
+    async def list_events(
+        self, run_id: str, after_id: int = 0, *, check_run_exists: bool = True
+    ) -> list[TimelineEvent]:
+        if check_run_exists:
+            await self.get_run(run_id)
         async with self._connect() as connection:
             cursor = await connection.execute(
                 """

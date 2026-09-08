@@ -102,11 +102,23 @@ class RunCoordinator:
         return RunAccepted(id=run_id, status=RunStatus.RESUMING)
 
     async def get_detail(self, run_id: str) -> RunDetail:
-        run = await self.repository.get_run(run_id)
-        with timed("langgraph.checkpoint_read"):
-            snapshot = await self.graph.aget_state(self._config(run.thread_id))
+        with timed("history.run_record"):
+            run = await self.repository.get_run(run_id)
+
+        async def read_checkpoint():
+            with timed("langgraph.checkpoint_read"):
+                return await self.graph.aget_state(self._config(run.thread_id))
+
+        async def read_events():
+            with timed("history.timeline_read"):
+                # The run was already validated above; avoid a second SELECT/connection.
+                return await self.repository.list_events(run_id, check_run_exists=False)
+
+        async with asyncio.TaskGroup() as reads:
+            checkpoint = reads.create_task(read_checkpoint())
+            timeline = reads.create_task(read_events())
+        snapshot, events = checkpoint.result(), timeline.result()
         values = dict(snapshot.values) if snapshot and snapshot.values else {}
-        events = await self.repository.list_events(run_id)
         interrupts = getattr(snapshot, "interrupts", ()) if snapshot else ()
         interrupt_payload = interrupts[0].value if interrupts else None
         executions = [
