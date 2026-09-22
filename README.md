@@ -7,6 +7,16 @@ connected services. LangGraph coordinates semantic MCP tools, reads can run
 autonomously, and every external write pauses at a persisted human approval
 checkpoint before it is executed idempotently and verified against the provider.
 
+## Live Demo
+
+[![Watch the full DayPilot demo](portfolio-media/recordings/daypilot-demo.gif)](portfolio-media/recordings/daypilot-demo.mov)
+
+DayPilot grounds requests in connected context, builds a dependency-aware plan,
+pauses for human approval, supports revision, and executes approved actions with
+verification.
+
+[Live application](https://daypilot.dumpydon.workers.dev/)
+
 ## Demo
 
 Try this in the local workspace:
