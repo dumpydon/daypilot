@@ -100,6 +100,7 @@ const EMPTY_RUN_CONTEXT = {
 
 export function DayPilotWorkspace() {
   const [catalog, setCatalog] = useState<ToolCatalog>(emptyCatalog);
+  const [catalogKnown, setCatalogKnown] = useState(false);
   const [connections, setConnections] = useState<ConnectionCatalog>(emptyConnections);
   const [fileRoots, setFileRoots] = useState<FileRoot[]>([]);
   const [preferences, setPreferences] = useState<Preferences>(defaultPreferences);
@@ -132,6 +133,7 @@ export function DayPilotWorkspace() {
   const capabilityInspectorRef = useRef<HTMLElement>(null);
   const submitInFlightRef = useRef(false);
   const submitGenerationRef = useRef(0);
+  const bootstrapTimingRef = useRef<string | null>(null);
   const [runtimeMode, setRuntimeMode] = useState("unknown");
   const [readiness, setReadiness] = useState<ReadinessStatus>({
     state: "starting",
@@ -142,6 +144,7 @@ export function DayPilotWorkspace() {
   });
   const [workspaceHydrating, setWorkspaceHydrating] = useState(true);
   const [adminHydrating, setAdminHydrating] = useState(true);
+  const [adminStatusKnown, setAdminStatusKnown] = useState(false);
   const [adminServicesLoading, setAdminServicesLoading] = useState(false);
   const [adminServicesError, setAdminServicesError] = useState<string | null>(null);
   const adminRefreshGeneration = useRef(0);
@@ -204,60 +207,83 @@ export function DayPilotWorkspace() {
 
   useEffect(() => {
     let cancelled = false;
-    void activateWarmWindow();
-    async function loadWorkspace() {
+    const generation = adminRefreshGeneration.current;
+    bootstrapTimingRef.current = startTiming("bootstrap.workspace_ready");
+    const currentView = () => !cancelled && generation === adminRefreshGeneration.current;
+    async function hydrate<T>(
+      name: string, read: () => Promise<T>, apply: (value: T) => void,
+      finished?: () => void,
+      stillCurrent: () => boolean = currentView,
+    ) {
+      const timing = startTiming(`bootstrap.${name}`);
       try {
-        let current: ReadinessStatus | null = null;
-        let attempt = 0;
-        while (!cancelled) {
-          try {
-            current = await getReadiness();
-            if (!cancelled) setReadiness(current);
-            if (current.state !== "starting") break;
-          } catch {
-            current = {
-              state: "starting",
-              mcp_servers_ready: 0,
-              mcp_servers_total: 6,
-              degraded_services: [],
-              message: "DayPilot is waking up and connecting services.",
-            };
-            if (!cancelled) setReadiness(current);
-          }
-          attempt += 1;
-          await delay(Math.min(500 + attempt * 50, 2_000));
-        }
-        if (cancelled || !current || current.state === "starting") return;
-        try {
-          const health = await getHealth();
-          if (!cancelled) setRuntimeMode(health.reasoning_mode);
-        } catch {
-          if (!cancelled) setRuntimeMode("unavailable");
-        }
-        try {
-          const [nextCatalog, nextPreferences, nextRuns, nextConnections, nextFileRoots] = await Promise.all([
-            getTools(), getPreferences(), listRuns(), getConnections(), listFileRoots(),
-          ]);
-          if (cancelled) return;
-          setCatalog(nextCatalog);
-          setPreferences(nextPreferences);
-          setRuns(nextRuns);
-          setConnections(nextConnections);
-          setFileRoots(nextFileRoots);
-        } catch (cause) {
-          if (!cancelled) setError(messageFrom(cause));
-        }
+        const value = await read();
+        if (stillCurrent()) apply(value);
+      } catch (cause) {
+        if (stillCurrent()) setError(messageFrom(cause));
       } finally {
-        if (!cancelled) setWorkspaceHydrating(false);
+        endTiming(`bootstrap.${name}`, timing);
+        if (stillCurrent()) finished?.();
       }
     }
+    void activateWarmWindow();
+    async function loadWorkspace() {
+      const readinessTiming = startTiming("bootstrap.readiness");
+      let current: ReadinessStatus | null = null;
+      let attempt = 0;
+      while (!cancelled) {
+        try {
+          current = await getReadiness();
+          if (!cancelled) setReadiness(current);
+          if (current.state !== "starting") break;
+        } catch {
+          current = {
+            state: "starting", mcp_servers_ready: 0, mcp_servers_total: 6,
+            degraded_services: [], message: "DayPilot is waking up and connecting services.",
+          };
+          if (!cancelled) setReadiness(current);
+        }
+        attempt += 1;
+        await delay(Math.min(500 + attempt * 50, 2_000));
+      }
+      endTiming("bootstrap.readiness", readinessTiming);
+      if (cancelled || !current || current.state === "starting") return;
+      void hydrate("health", getHealth, (health) => setRuntimeMode(health.reasoning_mode), undefined, () => !cancelled);
+      if (!currentView()) return;
+      // The server must initialize its auth service first during a real cold start.
+      // After core readiness, all reads start together and apply independently.
+      void hydrate("admin", getAdminStatus, (status) => {
+        setAdminStatus(status);
+        setAdminStatusKnown(true);
+      }, () => setAdminHydrating(false));
+      void hydrate("catalog", getTools, (value) => {
+        setCatalog(value);
+        setCatalogKnown(true);
+      }, () => setWorkspaceHydrating(false));
+      void hydrate("preferences", getPreferences, setPreferences);
+      void hydrate("history", listRuns, (history) => setRuns((currentRuns) => {
+        // A late initial snapshot cannot overwrite a newer run created/updated
+        // by the user while history was loading independently.
+        const merged = new Map(history.map((run) => [run.id, run]));
+        for (const run of currentRuns) {
+          const fetched = merged.get(run.id);
+          if (!fetched || Date.parse(run.updated_at) >= Date.parse(fetched.updated_at)) merged.set(run.id, run);
+        }
+        return [...merged.values()].sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+      }));
+      void hydrate("connections", getConnections, setConnections);
+      void hydrate("file_roots", listFileRoots, setFileRoots);
+    }
     void loadWorkspace();
-    void getAdminStatus()
-      .then((status) => { if (!cancelled) setAdminStatus(status); })
-      .catch(() => undefined)
-      .finally(() => { if (!cancelled) setAdminHydrating(false); });
     return () => { cancelled = true; };
   }, []);
+
+  useEffect(() => {
+    if (catalogKnown && adminStatusKnown && !workspaceResolving && bootstrapTimingRef.current) {
+      endTiming("bootstrap.workspace_ready", bootstrapTimingRef.current);
+      bootstrapTimingRef.current = null;
+    }
+  }, [catalogKnown, adminStatusKnown, workspaceResolving]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -438,6 +464,7 @@ export function DayPilotWorkspace() {
       setConnections(nextConnections);
       setFileRoots(nextFileRoots);
       setCatalog(nextCatalog);
+      setCatalogKnown(true);
     } finally {
       setWorkspaceHydrating(false);
     }
@@ -446,6 +473,8 @@ export function DayPilotWorkspace() {
   async function unlockAdmin(accessCode: string) {
     const status = await adminLogin(accessCode);
     setAdminStatus(status);
+    setAdminStatusKnown(true);
+    setAdminHydrating(false);
     setNotice("Admin mode enabled.");
     void refreshAdminWorkspace();
   }
@@ -461,6 +490,7 @@ export function DayPilotWorkspace() {
       ]);
       if (generation !== adminRefreshGeneration.current) return;
       setCatalog(nextCatalog);
+      setCatalogKnown(true);
       setConnections(nextConnections);
       setPreferences(nextPreferences);
       setRuns(nextRuns);
@@ -485,10 +515,13 @@ export function DayPilotWorkspace() {
     try {
       const status = await adminLogout();
       setAdminStatus(status);
+      setAdminStatusKnown(true);
+      setAdminHydrating(false);
       const [nextCatalog, nextConnections, nextPreferences, nextRuns, nextFileRoots] = await Promise.all([
         getTools(), getConnections(), getPreferences(), listRuns(), listFileRoots(),
       ]);
       setCatalog(nextCatalog);
+      setCatalogKnown(true);
       setConnections(nextConnections);
       setPreferences(nextPreferences);
       setRuns(nextRuns);
@@ -604,6 +637,7 @@ export function DayPilotWorkspace() {
           reasoningMode={reasoningMode}
           readinessState={readiness.state}
           workspaceHydrating={workspaceResolving}
+          catalogKnown={catalogKnown && adminStatusKnown}
           publicDemoMode={adminStatus.public_demo_mode}
           adminAuthenticated={adminStatus.authenticated}
           active={busy || Boolean(activeRun && ["queued", "running", "resuming"].includes(activeRun.status))}

@@ -222,8 +222,39 @@ describe("optimistic run submission", () => {
 
     await waitFor(() => expect(screen.getByText("DayPilot is ready; finishing workspace sync.")).toBeInTheDocument());
     expect(screen.getByText("Finishing workspace sync…")).toBeInTheDocument();
+    expect(screen.getByText("Syncing workspace…")).toBeInTheDocument();
+    expect(screen.queryByText("0/5 connected")).not.toBeInTheDocument();
     resolveTools?.(capabilityCatalog);
     await waitFor(() => expect(screen.queryByText("DayPilot is ready; finishing workspace sync.")).not.toBeInTheDocument());
+  });
+
+  it("restores authenticated services without waiting for history, preferences, or runtime", async () => {
+    api.getAdminStatus.mockResolvedValue({ authenticated: true, public_demo_mode: true });
+    api.getTools.mockResolvedValue({ ...capabilityCatalog, servers: capabilityCatalog.servers.map((server) => ({ ...server, provider: "Google Workspace", provider_state: "connected" })) });
+    api.listRuns.mockImplementation(() => new Promise(() => {}));
+    api.getPreferences.mockImplementation(() => new Promise(() => {}));
+    api.getHealth.mockImplementation(() => new Promise(() => {}));
+    render(<DayPilotWorkspace />);
+    await screen.findByText("Connected workspace");
+    expect(screen.getByLabelText("6/6 MCP servers")).toBeInTheDocument();
+    expect(screen.queryByText("Finishing workspace sync…")).not.toBeInTheDocument();
+    for (const read of [api.getReadiness, api.getAdminStatus, api.getTools, api.listRuns, api.getPreferences, api.getConnections, api.listFileRoots, api.getHealth]) expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a successful catalog while surfacing a failed auxiliary history read", async () => {
+    api.listRuns.mockRejectedValueOnce(new Error("History unavailable"));
+    render(<DayPilotWorkspace />);
+    await screen.findByText("History unavailable");
+    await waitFor(() => expect(screen.queryByText("Finishing workspace sync…")).not.toBeInTheDocument());
+    expect(screen.getByLabelText("6/6 MCP servers")).toBeInTheDocument();
+  });
+
+  it("does not claim known-zero connections after a catalog failure", async () => {
+    api.getTools.mockRejectedValueOnce(new Error("Catalog unavailable"));
+    render(<DayPilotWorkspace />);
+    await screen.findByText("Catalog unavailable");
+    expect(screen.getByText("Connections unavailable")).toBeInTheDocument();
+    expect(screen.queryByText("0/5 connected")).not.toBeInTheDocument();
   });
 
   it("moves into a pending run immediately while create-run is slow", async () => {

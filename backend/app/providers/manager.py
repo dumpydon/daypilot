@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import sqlite3
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -58,6 +60,13 @@ GOOGLE_REQUIRED_SCOPES = {
 }
 
 
+@dataclass(frozen=True)
+class _ConnectionSnapshot:
+    modes: dict[str, str]
+    accounts: dict[str, dict[str, Any]]
+    roots: list[dict[str, Any]]
+
+
 class ConnectionManager:
     """Owns connection metadata and OAuth state; MCP tools remain elsewhere."""
 
@@ -86,10 +95,41 @@ class ConnectionManager:
         return self._credentials
 
     def catalog(self) -> ConnectionCatalog:
+        snapshot = self._connection_snapshot()
         return ConnectionCatalog(
             demo_mode=self.settings.daypilot_demo_mode,
-            connections=[self.connection(service) for service in ProviderModeStore.SERVICES],
+            connections=[
+                self.connection(service, snapshot=snapshot)
+                for service in ProviderModeStore.SERVICES
+            ],
         )
+
+    def _connection_snapshot(self) -> _ConnectionSnapshot | None:
+        if self.settings.daypilot_demo_mode:
+            return None
+        try:
+            with (
+                timed("provider.catalog_snapshot"),
+                connect_sync(self.settings.database_target) as db,
+            ):
+                modes = {
+                    str(row["service"]): str(row["mode"])
+                    for row in db.execute("SELECT service, mode FROM provider_modes").fetchall()
+                }
+                accounts = {
+                    str(row["toolkit"]): dict(row)
+                    for row in db.execute(
+                        "SELECT toolkit, account_id, status, account_label, last_error, updated_at "
+                        "FROM managed_accounts"
+                    ).fetchall()
+                }
+                roots = [dict(row) for row in db.execute("SELECT id, path, label FROM file_roots")]
+            return _ConnectionSnapshot(modes, accounts, roots)
+        except sqlite3.OperationalError as exc:
+            # Preserve standalone SQLite adapters before application schema setup.
+            if "no such table" not in str(exc):
+                raise
+            return None
 
     def public_catalog(self) -> ConnectionCatalog:
         if not self.settings.public_demo_mode or self.settings.daypilot_demo_mode:
@@ -117,6 +157,16 @@ class ConnectionManager:
     def status(self, service: str) -> dict[str, Any]:
         with timed("provider.status"):
             connection = self.connection(service)
+        return self._status(connection)
+
+    def statuses(self) -> dict[str, dict[str, Any]]:
+        return {
+            connection.service: self._status(connection)
+            for connection in self.catalog().connections
+        }
+
+    @staticmethod
+    def _status(connection: ProviderConnection) -> dict[str, Any]:
         return {
             "provider": connection.provider,
             "provider_state": connection.state.value,
@@ -126,8 +176,14 @@ class ConnectionManager:
             "connection_mode": connection.connection_mode,
         }
 
-    def connection(self, service: str) -> ProviderConnection:
-        mode = self.mode_store.get(service)
+    def connection(
+        self, service: str, *, snapshot: _ConnectionSnapshot | None = None
+    ) -> ProviderConnection:
+        mode = (
+            snapshot.modes.get(service, self.mode_store.defaults[service])
+            if snapshot is not None
+            else self.mode_store.get(service)
+        )
         if mode == "direct":
             mode = {
                 "mail": "gmail",
@@ -159,15 +215,27 @@ class ConnectionManager:
             )
         if mode == "managed":
             if service in {"mail", "calendar", "tasks"}:
-                return self._managed_google_connection(service, capabilities)
+                return self._managed_connection(
+                    service,
+                    self.settings.composio_google_toolkit,
+                    "Google Workspace",
+                    capabilities,
+                    snapshot=snapshot,
+                )
             if service == "x":
-                return self._managed_x_connection(capabilities)
-            return self._files_connection(capabilities)
+                return self._managed_connection(
+                    "x",
+                    self.settings.composio_x_toolkit,
+                    "X",
+                    capabilities,
+                    snapshot=snapshot,
+                )
+            return self._files_connection(capabilities, snapshot=snapshot)
         if service in {"mail", "calendar", "tasks"}:
             return self._google_connection(service, mode, capabilities)
         if service == "x":
             return self._x_connection(capabilities)
-        return self._files_connection(capabilities)
+        return self._files_connection(capabilities, snapshot=snapshot)
 
     def start_google(self) -> OAuthStartResponse:
         if self.settings.daypilot_demo_mode:
@@ -457,6 +525,8 @@ class ConnectionManager:
         toolkit: str,
         provider: str,
         capabilities: list[str],
+        *,
+        snapshot: _ConnectionSnapshot | None = None,
     ) -> ProviderConnection:
         if toolkit in MANAGED_AUTH_UNAVAILABLE:
             return ProviderConnection(
@@ -478,7 +548,11 @@ class ConnectionManager:
                 metadata={"mode": "managed", "toolkit": toolkit},
                 connection_mode="managed",
             )
-        account = self.managed_state.account(toolkit)
+        account = (
+            snapshot.accounts.get(toolkit)
+            if snapshot is not None
+            else self.managed_state.account(toolkit)
+        )
         if not account:
             return ProviderConnection(
                 service=service,
@@ -561,8 +635,12 @@ class ConnectionManager:
             connection_mode="direct",
         )
 
-    def _files_connection(self, capabilities: list[str]) -> ProviderConnection:
-        roots = _read_roots(self.settings.database_target)
+    def _files_connection(
+        self, capabilities: list[str], *, snapshot: _ConnectionSnapshot | None = None
+    ) -> ProviderConnection:
+        roots = (
+            snapshot.roots if snapshot is not None else _read_roots(self.settings.database_target)
+        )
         existing = [root for root in roots if Path(root["path"]).is_dir()]
         if existing and len(existing) == len(roots):
             state = ProviderConnectionState.CONNECTED

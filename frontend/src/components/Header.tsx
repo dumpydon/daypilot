@@ -15,6 +15,7 @@ interface HeaderProps {
   active?: boolean;
   readinessState?: "starting" | "ready" | "degraded";
   workspaceHydrating?: boolean;
+  catalogKnown?: boolean;
   publicDemoMode?: boolean;
   adminAuthenticated?: boolean;
 }
@@ -27,12 +28,13 @@ export function Header({
   active = false,
   readinessState = "ready",
   workspaceHydrating = false,
+  catalogKnown = true,
   publicDemoMode = false,
   adminAuthenticated = false,
 }: HeaderProps) {
   const connected = servers.filter((server) => server.connected).length;
   const realConnected = servers.filter(
-    (server) => server.connected
+    (server) => server.name !== "web" && server.connected
       && server.provider
       && server.provider !== "DayPilot demo"
       && server.provider_state === "connected",
@@ -93,6 +95,10 @@ export function Header({
         <span className={styles.demoBadge}>
           {waking
             ? "Waking DayPilot…"
+            : resolvingWorkspace
+              ? "Syncing workspace…"
+              : !catalogKnown
+                ? "Connections unavailable"
             : publicDemoMode && !adminAuthenticated
               ? "Public demo"
               : !hasConfiguredProvider
@@ -101,13 +107,15 @@ export function Header({
                   ? "Connected workspace"
                   : `${realConnected}/5 connected`}
         </span>
-        <span className={styles.serverHealth} aria-label={waking ? "MCP servers connecting" : publicVisitor ? "Public demo services ready" : `${connected}/${servers.length} MCP servers`}>
+        <span className={styles.serverHealth} aria-label={waking ? "MCP servers connecting" : !catalogKnown ? "MCP state loading" : publicVisitor ? "Public demo services ready" : `${connected}/${servers.length} MCP servers`}>
           <Cable size={13} />
           <i className={serverHealthDot} />
           {waking
             ? "Connecting services…"
             : resolvingWorkspace
               ? "Finishing workspace sync…"
+              : !catalogKnown
+                ? "Could not load service status"
               : publicVisitor
                 ? readinessState === "ready" ? "Public demo · Web ready" : "Public demo · Limited services"
                 : <><strong>{connected}/{servers.length}</strong> MCP servers</>}

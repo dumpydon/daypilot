@@ -247,6 +247,20 @@ describe("DayPilot operations workspace", () => {
     expect(health.querySelector("i")?.className).not.toContain("hydrationPulse");
   });
 
+  it("distinguishes unknown provider state from verified zero connections", () => {
+    const servers = capabilityCatalog.servers.map((server) => ({ ...server, connected: false, provider: "Google Workspace", provider_state: "disconnected" as const }));
+    const view = render(<Header servers={servers} reasoningMode="openai" onMenu={vi.fn()} workspaceHydrating catalogKnown={false} />);
+    expect(screen.getByText("Syncing workspace…")).toBeInTheDocument();
+    expect(screen.getByLabelText("MCP state loading")).toBeInTheDocument();
+    expect(screen.queryByText("0/5 connected")).not.toBeInTheDocument();
+    view.rerender(<Header servers={servers} reasoningMode="openai" onMenu={vi.fn()} catalogKnown />);
+    expect(screen.getByText("0/5 connected")).toBeInTheDocument();
+    expect(screen.getByLabelText("0/6 MCP servers")).toBeInTheDocument();
+    view.rerender(<Header servers={servers} reasoningMode="openai" onMenu={vi.fn()} publicDemoMode catalogKnown />);
+    expect(screen.getByText("Public demo")).toBeInTheDocument();
+    expect(screen.queryByText("0/5 connected")).not.toBeInTheDocument();
+  });
+
   it("marks Mail as used when search_mail succeeds without a thread read", () => {
     render(
       <ContextPanel

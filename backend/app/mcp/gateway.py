@@ -41,11 +41,13 @@ class MCPGateway:
         self._metadata: dict[str, ToolMetadata] = {}
         self._server_status: dict[str, dict[str, Any]] = {}
         self._catalog_cache: dict[bool, tuple[float, list[dict[str, Any]]]] = {}
-        # Keep the raw flag for diagnostics/backwards compatibility; cache
-        # decisions use the effective visibility scope below.
+        self._catalog_generation = 0
+        # Discovery is cached per server. Public responses are still filtered
+        # on every read; a public visitor must not evict the warmed admin tools.
         self._discovery_admin_authorized: bool | None = None
         self._discovery_full_access: bool | None = None
         self._discovery_lock = asyncio.Lock()
+        self._discovered_servers: set[str] = set()
         project_root = Path(__file__).resolve().parents[3]
         # Keep provider secrets/configuration explicit, but retain the standard
         # runtime environment needed by SDK TLS/HTTP clients (notably HOME for
@@ -99,26 +101,33 @@ class MCPGateway:
         force: bool,
         admin_authorized: bool,
     ) -> list[ToolMetadata]:
-        discovery_scope = not self._is_public_restricted(admin_authorized)
-        if self._metadata and not force and self._discovery_full_access == discovery_scope:
-            return list(self._metadata.values())
-        self._tools.clear()
-        self._metadata.clear()
-        self._server_status.clear()
-        self._catalog_cache.clear()
-        self._discovery_admin_authorized = admin_authorized
-        self._discovery_full_access = discovery_scope
         server_names = self._visible_server_names(admin_authorized)
+        visible = set(server_names)
+        visible_metadata = [item for item in self._metadata.values() if item.server_name in visible]
+        retry_empty_catalog = not visible_metadata
+        if visible_metadata and not force and visible <= self._discovered_servers:
+            return visible_metadata
+        self.invalidate_catalog()
+        self._discovery_admin_authorized = admin_authorized
         for server_name in self.connections:
             if server_name not in server_names:
-                self._server_status[server_name] = {
-                    "name": server_name,
-                    "connected": False,
-                    "tool_count": 0,
-                    "tools": [],
-                    "error": "Personal capability available to admin only.",
-                }
+                self._server_status.setdefault(
+                    server_name,
+                    {
+                        "name": server_name,
+                        "connected": False,
+                        "tool_count": 0,
+                        "tools": [],
+                        "error": "Personal capability available to admin only.",
+                    },
+                )
                 continue
+            if not force and server_name in self._discovered_servers and not retry_empty_catalog:
+                continue
+            for name, metadata in tuple(self._metadata.items()):
+                if metadata.server_name == server_name:
+                    self._metadata.pop(name, None)
+                    self._tools.pop(name, None)
             try:
                 with timed(f"mcp.discovery.{server_name}"):
                     tools = await self.client.get_tools(server_name=server_name)
@@ -154,10 +163,12 @@ class MCPGateway:
                     "tools": [],
                     "error": f"{server_name.title()} capability could not initialize.",
                 }
+            self._discovered_servers.add(server_name)
         # A catalog request may have raced the sequential discovery loop;
         # discard any partial status snapshot before exposing the completed one.
-        self._catalog_cache.clear()
-        return list(self._metadata.values())
+        self.invalidate_catalog()
+        self._discovery_full_access = set(self.connections) <= self._discovered_servers
+        return [item for item in self._metadata.values() if item.server_name in visible]
 
     async def invoke(
         self,
@@ -167,14 +178,14 @@ class MCPGateway:
         authorization: WriteAuthorization | None = None,
         admin_authorized: bool = False,
     ) -> Any:
-        discovery_scope = not self._is_public_restricted(admin_authorized)
         async with self._discovery_lock:
-            if not self._tools or (
+            if tool_name not in self._tools or (
                 self._discovery_full_access is not None
-                and self._discovery_full_access != discovery_scope
+                and not set(self._visible_server_names(admin_authorized))
+                <= self._discovered_servers
             ):
                 await self._discover_locked(
-                    force=bool(self._tools),
+                    force=False,
                     admin_authorized=admin_authorized,
                 )
             tool = self._tools.get(tool_name)
@@ -211,17 +222,26 @@ class MCPGateway:
                 return deepcopy(cached_catalog)
             self._catalog_cache.pop(cache_scope, None)
         with timed("mcp.catalog"):
+            generation = self._catalog_generation
             result = self._build_catalog(admin_authorized=admin_authorized)
-        self._catalog_cache[cache_scope] = (monotonic(), deepcopy(result))
+        if generation == self._catalog_generation:
+            self._catalog_cache[cache_scope] = (monotonic(), deepcopy(result))
         return result
 
     def invalidate_catalog(self) -> None:
         """Drop provider-status snapshots after an explicit connection change."""
+        self._catalog_generation += 1
         self._catalog_cache.clear()
 
     def _build_catalog(self, *, admin_authorized: bool) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
-        for server_name, status in self._server_status.items():
+        statuses = (
+            self.connection_manager.statuses()
+            if self.connection_manager is not None
+            and not self._is_public_restricted(admin_authorized)
+            else {}
+        )
+        for server_name, status in tuple(self._server_status.items()):
             if self._is_public_restricted(admin_authorized) and server_name != "web":
                 result.append(
                     {
@@ -241,7 +261,12 @@ class MCPGateway:
                     }
                 )
                 continue
-            result.append({**status, **self._connection_status(server_name)})
+            connection = (
+                self._connection_status(server_name)
+                if server_name == "web"
+                else statuses.get(server_name, {})
+            )
+            result.append({**status, **connection})
         return result
 
     def _connection_status(self, server_name: str) -> dict[str, Any]:

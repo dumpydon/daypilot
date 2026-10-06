@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 from typing import ClassVar
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
@@ -25,7 +27,7 @@ from backend.app.main import _initialize_runtime
 from backend.app.mcp.gateway import MCPGateway
 from backend.app.persistence.repository import DayPilotRepository
 from backend.app.services.access import requires_personal_access
-from backend.app.services.admin_auth import AdminAuthService
+from backend.app.services.admin_auth import ADMIN_COOKIE_NAME, AdminAuthService
 
 
 class StubCoordinator:
@@ -190,6 +192,33 @@ def test_admin_session_unlocks_personal_routing_and_logout_locks_it_again(tmp_pa
     assert blocked.status_code == 403
 
 
+def test_admin_restoration_uses_one_authoritative_lookup_and_honors_revocation(
+    tmp_path, monkeypatch
+):
+    app, _ = _app(tmp_path)
+    client = TestClient(app)
+    assert (
+        client.post(
+            "/api/admin/login", json={"access_code": app.state.settings.admin_secret}
+        ).status_code
+        == 200
+    )
+    repo = app.state.repository
+    expiry = AsyncMock(wraps=repo.admin_session_expiry)
+    monkeypatch.setattr(repo, "admin_session_expiry", expiry)
+    monkeypatch.setattr(
+        repo,
+        "is_admin_session_valid",
+        AsyncMock(side_effect=AssertionError("Duplicate status lookup")),
+    )
+    assert client.get("/api/admin/status").json()["authenticated"] is True
+    expiry.assert_awaited_once()
+    token = client.cookies.get(ADMIN_COOKIE_NAME)
+    assert client.post("/api/admin/logout").status_code == 200
+    client.cookies.set(ADMIN_COOKIE_NAME, token)
+    assert client.get("/api/admin/status").json()["authenticated"] is False
+
+
 def test_public_cannot_manage_google_connections(tmp_path: Path) -> None:
     app, _ = _app(tmp_path)
     client = TestClient(app)
@@ -299,11 +328,20 @@ async def test_gateway_switches_public_and_admin_catalogs_without_leaking_privat
             return {"tool": self.name}
 
     class FakeClient:
+        calls: ClassVar[Counter] = Counter()
+
         async def get_tools(self, *, server_name: str):
+            self.calls[server_name] += 1
             return [FakeTool(tool_names[server_name])]
 
     gateway.client = FakeClient()  # type: ignore[assignment]
     await gateway.discover(admin_authorized=True)
+    public_tools = await gateway.discover(admin_authorized=False)
+    assert {tool.server_name for tool in public_tools} == {"web"}
+    await gateway.discover(admin_authorized=True)
+    assert gateway.client.calls == Counter({name: 1 for name in tool_names})
+    with pytest.raises(UnauthorizedToolCallError):
+        await gateway.invoke("search_mail", {"query": "latest"}, admin_authorized=False)
 
     public_mail = next(
         item for item in gateway.catalog(admin_authorized=False) if item["name"] == "mail"
@@ -313,6 +351,8 @@ async def test_gateway_switches_public_and_admin_catalogs_without_leaking_privat
     assert public_mail["account_label"] is None
 
     await gateway.discover(force=True, admin_authorized=False)
+    assert gateway.client.calls["web"] == 2
+    assert gateway.client.calls["mail"] == 1
     assert await gateway.invoke(
         "search_mail",
         {"query": "latest"},

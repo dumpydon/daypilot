@@ -205,14 +205,14 @@ async def admin_logout(request: Request) -> Response:
 
 @router.get("/api/admin/status", response_model=AdminStatusResponse)
 async def admin_status(request: Request) -> AdminStatusResponse:
-    authenticated = await _is_admin(request)
     service = _admin_service(request)
+    with timed("bootstrap.admin_session"):
+        expiry = await service.expiry(request.cookies.get(ADMIN_COOKIE_NAME)) if service else None
+    authenticated = expiry is not None if service else not _public_mode(request)
     return AdminStatusResponse(
         authenticated=authenticated,
         public_demo_mode=_public_mode(request),
-        expires_at=(await service.expiry(request.cookies.get(ADMIN_COOKIE_NAME)))
-        if service
-        else None,
+        expires_at=expiry,
         message=(
             "Admin mode enabled. Personal services are available."
             if authenticated
@@ -251,8 +251,9 @@ async def reset_demo_workspace(request: Request) -> DemoResetResponse:
 @router.get("/api/connections", response_model=ConnectionCatalog)
 async def list_connections(request: Request) -> ConnectionCatalog:
     if _public_mode(request) and not await _is_admin(request):
-        return request.app.state.connections.public_catalog()
-    return request.app.state.connections.catalog()
+        return await asyncio.to_thread(request.app.state.connections.public_catalog)
+    with timed("bootstrap.connections"):
+        return await asyncio.to_thread(request.app.state.connections.catalog)
 
 
 @router.post("/api/connections/google/start", response_model=OAuthStartResponse)
@@ -441,7 +442,7 @@ async def list_tools(request: Request) -> dict[str, Any]:
     admin_authorized = await _is_admin(request)
     if getattr(request.app.state, "runtime_state", "starting") == "starting":
         return {
-            "servers": gateway.catalog(admin_authorized=admin_authorized),
+            "servers": await asyncio.to_thread(gateway.catalog, admin_authorized=admin_authorized),
             "tools": [],
         }
     tools = await gateway.discover(
@@ -452,7 +453,7 @@ async def list_tools(request: Request) -> dict[str, Any]:
         admin_authorized=admin_authorized,
     )
     return {
-        "servers": gateway.catalog(admin_authorized=admin_authorized),
+        "servers": await asyncio.to_thread(gateway.catalog, admin_authorized=admin_authorized),
         "tools": [tool.model_dump(mode="json") for tool in tools],
     }
 
