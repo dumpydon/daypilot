@@ -19,6 +19,7 @@ dependencies = [
   "mcp>=1.29,<2",
   "pydantic-settings>=2.15,<3",
   "psycopg[binary]>=3.2,<4",
+  "psycopg-pool>=3.2,<4",
   "python-dotenv>=1.2,<2",
   "uvicorn[standard]>=0.52,<1",
 ]

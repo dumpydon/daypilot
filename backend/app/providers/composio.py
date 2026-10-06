@@ -339,7 +339,8 @@ class ComposioManagedClient:
             }
             if self.settings.composio_base_url:
                 kwargs["base_url"] = self.settings.composio_base_url
-            self._client_instance = factory(**kwargs)
+            with timed("composio.client_initialization"):
+                self._client_instance = factory(**kwargs)
         except Exception as exc:
             raise self._error("Composio could not be initialized", exc) from exc
         return self._client_instance
@@ -356,7 +357,8 @@ class ComposioManagedClient:
                     return cached[1]
                 if existing:
                     try:
-                        session = client.sessions.use(persisted_id, mcp=True)
+                        with timed("composio.session_restore"):
+                            session = client.sessions.use(persisted_id, mcp=True)
                         self._session_cache[toolkit] = (persisted_id, session)
                         return session
                     except Exception:
@@ -385,7 +387,8 @@ class ComposioManagedClient:
                         toolkit: [str(active_account["account_id"])]
                     }
                 try:
-                    session = client.sessions.create(**session_options)
+                    with timed("composio.session_create"):
+                        session = client.sessions.create(**session_options)
                 except Exception as exc:
                     raise self._error(
                         "Composio could not create a managed MCP session", exc

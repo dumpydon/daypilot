@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -86,7 +87,7 @@ def build_daypilot_graph(dependencies: WorkflowDependencies, checkpointer: Any):
         # warm catalog; force a refresh only through an explicit startup,
         # reconnect, or admin/provider invalidation path.
         tools = await gateway.discover(force=False, admin_authorized=admin_authorized)
-        catalog = gateway.catalog(admin_authorized=admin_authorized)
+        catalog = await asyncio.to_thread(gateway.catalog, admin_authorized=admin_authorized)
         connected = sum(server["connected"] for server in catalog)
         await repository.append_event(
             state["run_id"],

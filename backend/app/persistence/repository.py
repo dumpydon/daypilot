@@ -25,6 +25,7 @@ from backend.app.persistence.database import (
     is_postgres_target,
     sqlite_path,
 )
+from backend.app.timing import timed, timed_async
 
 APP_SCHEMA_SQLITE = """
 PRAGMA journal_mode=WAL;
@@ -240,6 +241,33 @@ class DayPilotRepository:
             sqlite_path(database_target) if not is_postgres_target(database_target) else None
         )
         self.maintenance_lock = asyncio.Lock()
+        self._pool: Any | None = None
+
+    async def open_pool(self) -> None:
+        """Own a small async pool on this repository's event loop, never globally."""
+        if not is_postgres_target(self.database_target) or self._pool is not None:
+            return
+        from psycopg.rows import dict_row
+        from psycopg_pool import AsyncConnectionPool
+
+        pool = AsyncConnectionPool(
+            str(self.database_target),
+            open=False,
+            min_size=0,
+            max_size=4,
+            timeout=10,
+            max_idle=120,
+            check=AsyncConnectionPool.check_connection,
+            kwargs={"row_factory": dict_row, "prepare_threshold": None},
+            name="daypilot-repository",
+        )
+        await pool.open()
+        self._pool = pool
+
+    async def close(self) -> None:
+        pool, self._pool = self._pool, None
+        if pool is not None:
+            await pool.close()
 
     async def database_heartbeat(self) -> str:
         """Read the database clock without creating or changing application rows."""
@@ -291,6 +319,7 @@ class DayPilotRepository:
                 )
             )
 
+    @timed_async("persistence.create_run")
     async def create_run(
         self,
         run_id: str,
@@ -712,6 +741,7 @@ class DayPilotRepository:
     async def fail_run(self, run_id: str, error: str) -> None:
         await self._update_run(run_id, status=RunStatus.FAILED, error=error)
 
+    @timed_async("persistence.timeline_event")
     async def append_event(
         self,
         run_id: str,
@@ -898,6 +928,7 @@ class DayPilotRepository:
             await connection.commit()
         return preferences
 
+    @timed_async("persistence.run_update")
     async def _update_run(self, run_id: str, **updates: Any) -> None:
         allowed = {
             "status",
@@ -963,8 +994,15 @@ class DayPilotRepository:
 
     @asynccontextmanager
     async def _connect(self):
-        async with connect_async(self.database_target) as connection:
-            yield connection
+        if self._pool is not None:
+            from backend.app.persistence.database import AsyncConnection
+
+            with timed("postgres.pooled_operation"):
+                async with self._pool.connection() as connection:
+                    yield AsyncConnection(connection, postgres=True)
+        else:
+            async with connect_async(self.database_target) as connection:
+                yield connection
 
     async def _fetchone(
         self,

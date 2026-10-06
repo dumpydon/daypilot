@@ -81,6 +81,8 @@ async def _bootstrap_application(
 ) -> None:
     """Initialize persistence and graph resources without delaying HTTP binding."""
     stage = "service database"
+    repository: DayPilotRepository | None = None
+    gateway: MCPGateway | None = None
     try:
         initializer = (
             initialize_demo_database if settings.daypilot_demo_mode else ensure_demo_database_schema
@@ -99,6 +101,7 @@ async def _bootstrap_application(
         repository = DayPilotRepository(settings.database_target)
         with timed("startup.application_database"):
             await repository.initialize()
+            await repository.open_pool()
         app.state.database_state = "connected"
         provider_defaults = {
             service: settings.configured_provider(service)
@@ -188,6 +191,12 @@ async def _bootstrap_application(
             "message": f"DayPilot persistence is unavailable during {stage} initialization.",
         }
         await shutdown_event.wait()
+
+    finally:
+        if gateway is not None:
+            await gateway.close()
+        if repository is not None:
+            await repository.close()
 
 
 def _redacted_bootstrap_traceback(exc: Exception, settings: Settings) -> str:

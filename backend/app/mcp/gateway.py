@@ -13,17 +13,21 @@ from uuid import uuid4
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_mcp_adapters.tools import convert_mcp_tool_to_langchain_tool, load_mcp_tools
+from mcp.types import Tool as MCPTool
+from mcp.types import ToolAnnotations
 
 from backend.app.config import Settings
 from backend.app.domain.errors import ToolUnavailableError, UnauthorizedToolCallError
 from backend.app.domain.models import ToolMetadata
+from backend.app.mcp.mail_reader import MAIL_READ_TOOLS, MailReadSession
 from backend.app.mcp.policy import (
     WriteAuthorization,
     enforce_tool_policy,
     get_policy,
 )
 from backend.app.providers.manager import ConnectionManager
-from backend.app.timing import timed
+from backend.app.timing import enabled, timed
 
 logger = logging.getLogger(__name__)
 CATALOG_CACHE_TTL_SECONDS = 2.0
@@ -65,6 +69,8 @@ class MCPGateway:
             **runtime_env,
             **settings.mcp_environment(),
         }
+        if enabled():
+            base_env["DAYPILOT_TIMING_LOGS"] = "true"
         if not settings.database_is_postgres:
             base_env["DAYPILOT_DATABASE_PATH"] = str(settings.database_path)
         self.connections: dict[str, dict[str, Any]] = {
@@ -80,6 +86,10 @@ class MCPGateway:
         self.client = MultiServerMCPClient(
             self.connections,  # type: ignore[arg-type]
             handle_tool_errors=False,
+        )
+        self._mail_reader = MailReadSession(
+            lambda: self.client.session("mail"),
+            lambda session: load_mcp_tools(session, server_name="mail", handle_tool_errors=False),
         )
 
     async def discover(
@@ -107,7 +117,7 @@ class MCPGateway:
         retry_empty_catalog = not visible_metadata
         if visible_metadata and not force and visible <= self._discovered_servers:
             return visible_metadata
-        self.invalidate_catalog()
+        self.invalidate_catalog(provider_changed=False)
         self._discovery_admin_authorized = admin_authorized
         for server_name in self.connections:
             if server_name not in server_names:
@@ -130,7 +140,12 @@ class MCPGateway:
                     self._tools.pop(name, None)
             try:
                 with timed(f"mcp.discovery.{server_name}"):
-                    tools = await self.client.get_tools(server_name=server_name)
+                    if server_name == "mail" and hasattr(self.client, "session"):
+                        if force:
+                            self._mail_reader.invalidate()
+                        tools = await self._mail_reader.tools()
+                    else:
+                        tools = await self.client.get_tools(server_name=server_name)
                 for tool in tools:
                     policy = get_policy(tool.name, server_name)
                     metadata = ToolMetadata(
@@ -141,7 +156,28 @@ class MCPGateway:
                         side_effecting=policy.side_effecting,
                         input_schema=self._input_schema(tool),
                     )
-                    self._tools[tool.name] = tool
+                    # Keep stateless fallbacks (especially create_draft) separate
+                    # from the owner task's bound read tools. Closing/expiring the
+                    # retained reader must never leave a write bound to a dead session.
+                    self._tools[tool.name] = (
+                        convert_mcp_tool_to_langchain_tool(
+                            None,
+                            MCPTool(
+                                name=tool.name,
+                                description=tool.description,
+                                inputSchema=metadata.input_schema,
+                                annotations=ToolAnnotations.model_validate(tool.metadata)
+                                if tool.metadata
+                                else None,
+                                meta=(tool.metadata or {}).get("_meta"),
+                            ),
+                            connection=self.connections[server_name],
+                            server_name=server_name,
+                            handle_tool_errors=False,
+                        )
+                        if server_name == "mail" and hasattr(self.client, "session")
+                        else tool
+                    )
                     self._metadata[tool.name] = metadata
                 self._server_status[server_name] = {
                     "name": server_name,
@@ -166,7 +202,7 @@ class MCPGateway:
             self._discovered_servers.add(server_name)
         # A catalog request may have raced the sequential discovery loop;
         # discard any partial status snapshot before exposing the completed one.
-        self.invalidate_catalog()
+        self.invalidate_catalog(provider_changed=False)
         self._discovery_full_access = set(self.connections) <= self._discovered_servers
         return [item for item in self._metadata.values() if item.server_name in visible]
 
@@ -198,20 +234,38 @@ class MCPGateway:
             )
         policy = get_policy(tool_name, metadata.server_name)
         enforce_tool_policy(tool_name, arguments, policy, authorization)
+        retained_read = (
+            metadata.server_name == "mail"
+            and tool_name in MAIL_READ_TOOLS
+            and self._discovery_full_access is not None
+            and not policy.side_effecting
+            and hasattr(self.client, "session")
+        )
+        if not retained_read:
+            # Keep at most one retained subprocess. Complex/cross-domain work
+            # releases it before starting another service; writes keep their
+            # existing one-shot path and exact authorization policy.
+            await self._mail_reader.close()
         stage = {
             "search_mail": "mcp.search_mail",
             "get_thread": "mcp.get_thread",
         }.get(tool_name, "mcp.tool_invoke")
         with timed(stage):
-            result = await tool.ainvoke(
-                {
-                    "type": "tool_call",
-                    "id": f"mcp-{uuid4().hex}",
-                    "name": tool_name,
-                    "args": arguments,
-                }
+            payload = {
+                "type": "tool_call",
+                "id": f"mcp-{uuid4().hex}",
+                "name": tool_name,
+                "args": arguments,
+            }
+            result = (
+                await self._mail_reader.invoke(tool_name, payload)
+                if retained_read
+                else await tool.ainvoke(payload)
             )
         return self._structured_result(result)
+
+    async def close(self) -> None:
+        await self._mail_reader.close()
 
     def catalog(self, *, admin_authorized: bool = False) -> list[dict[str, Any]]:
         cache_scope = not self._is_public_restricted(admin_authorized)
@@ -228,10 +282,12 @@ class MCPGateway:
             self._catalog_cache[cache_scope] = (monotonic(), deepcopy(result))
         return result
 
-    def invalidate_catalog(self) -> None:
+    def invalidate_catalog(self, *, provider_changed: bool = True) -> None:
         """Drop provider-status snapshots after an explicit connection change."""
         self._catalog_generation += 1
         self._catalog_cache.clear()
+        if provider_changed:
+            self._mail_reader.invalidate()
 
     def _build_catalog(self, *, admin_authorized: bool) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []

@@ -11,9 +11,24 @@ import logging
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
+from functools import wraps
 from time import perf_counter
 
 logger = logging.getLogger(__name__)
+
+
+def timed_async(stage: str):
+    """Measure fixed-name async stages without logging function arguments/results."""
+
+    def decorate(function):
+        @wraps(function)
+        async def measured(*args, **kwargs):
+            with timed(stage):
+                return await function(*args, **kwargs)
+
+        return measured
+
+    return decorate
 
 
 def enabled() -> bool:
