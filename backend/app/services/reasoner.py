@@ -517,7 +517,6 @@ class OpenAIReasoner(DeterministicReasoner):
             return baseline
 
     async def answer_general(self, request: str, intent: UserIntent) -> str:
-        fallback = await super().answer_general(request, intent)
         prompt = (
             "Answer this standalone DayPilot request directly. It does not require personal "
             "services or fresh web research. Be useful and concise. For code, provide a clear "
@@ -530,13 +529,16 @@ class OpenAIReasoner(DeterministicReasoner):
                     prompt,
                     config={"run_name": "general_answer"},
                 )
-            if isinstance(response.content, str) and response.content.strip():
-                return response.content.strip()
+            # LangChain messages may contain Responses API reasoning/text blocks,
+            # not just a string. Extract only answer text, never reasoning blocks.
+            answer = response.text.strip()
+            if answer:
+                return answer
         except Exception as exc:
-            logger.warning("OpenAI general answer failed; using deterministic fallback")
-            if fallback.startswith("This general question needs model-backed reasoning."):
-                return _friendly_openai_failure(exc)
-        return fallback
+            logger.warning("OpenAI general answer failed")
+            return _friendly_openai_failure(exc)
+        logger.warning("OpenAI general answer returned no answer text")
+        return "OpenAI is configured but returned no answer text. Try again shortly."
 
     async def select_read_calls(
         self,
@@ -610,9 +612,9 @@ class OpenAIReasoner(DeterministicReasoner):
                     prompt,
                     config={"run_name": "grounded_read_summary"},
                 )
-            content = response.content
-            if isinstance(content, str) and content.strip():
-                return content.strip()
+            answer = response.text.strip()
+            if answer:
+                return answer
         except Exception:
             logger.warning("OpenAI grounded summarization failed; using deterministic summary")
         return fallback

@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import httpx
 import pytest
+from langchain_core.messages import AIMessage
 
 from backend.app.config import Settings
 from backend.app.domain.models import PreferenceSet, UserIntent
-from backend.app.services.reasoner import OpenAIReasoner
+from backend.app.graph.workflow import WorkflowDependencies, build_daypilot_graph
+from backend.app.services.coordinator import RunCoordinator
+from backend.app.services.planner import PlanBuilder
+from backend.app.services.reasoner import OpenAIReasoner, create_reasoner
 from backend.app.services.summarizer import summarize_read_only
 from backend.app.services.web_research import WebResearchService
 
@@ -13,6 +17,128 @@ from backend.app.services.web_research import WebResearchService
 class _NoUnderstandingModel:
     def with_structured_output(self, *_args, **_kwargs):
         raise AssertionError("general requests should not call the understanding model")
+
+
+class _AnswerModel(_NoUnderstandingModel):
+    def __init__(self, content):
+        self.content = content
+        self.calls = []
+
+    async def ainvoke(self, prompt, *, config):
+        self.calls.append(config["run_name"])
+        return AIMessage(content=self.content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content",
+    [
+        "A model-generated answer.",
+        [
+            {
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": "Private reasoning"}],
+            },
+            {"type": "text", "text": "A model-generated ", "annotations": []},
+            {"type": "text", "text": "answer.", "annotations": []},
+        ],
+    ],
+)
+async def test_general_model_answer_supports_string_and_content_blocks(content) -> None:
+    model = _AnswerModel(content)
+    reasoner = OpenAIReasoner(Settings(_env_file=None, openai_api_key="configured"), model=model)
+    intent = await reasoner.understand("What is the capital of Bolivia?")
+
+    answer = await reasoner.answer_general(intent.goal, intent)
+
+    assert answer == "A model-generated answer."
+    assert model.calls == ["general_answer"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content",
+    ["", "   ", [], [{"type": "reasoning", "summary": []}]],
+)
+async def test_configured_openai_empty_answer_does_not_claim_missing_key(content) -> None:
+    reasoner = OpenAIReasoner(
+        Settings(_env_file=None, openai_api_key="configured"), model=_AnswerModel(content)
+    )
+    intent = UserIntent(goal="Explain gravity", request_kind="general")
+
+    answer = await reasoner.answer_general(intent.goal, intent)
+
+    assert "configured" in answer
+    assert "Configure OPENAI_API_KEY" not in answer
+
+
+@pytest.mark.asyncio
+async def test_grounded_model_summary_supports_content_blocks() -> None:
+    model = _AnswerModel(
+        [
+            {"type": "reasoning", "summary": []},
+            {"type": "text", "text": "Grounded model summary."},
+        ]
+    )
+    reasoner = OpenAIReasoner(Settings(_env_file=None, openai_api_key="configured"), model=model)
+    intent = UserIntent(
+        goal="Summarize my mail", request_kind="personal", information_needed=["mail"]
+    )
+
+    answer = await reasoner.summarize_read_only(intent.goal, intent, {}, [])
+
+    assert answer == "Grounded model summary."
+    assert model.calls == ["grounded_read_summary"]
+
+
+def test_reasoner_and_runtime_status_share_settings_configuration() -> None:
+    configured = Settings(_env_file=None, openai_api_key="configured")
+    unconfigured = Settings(_env_file=None, openai_api_key=None)
+
+    assert create_reasoner(configured).mode == configured.reasoning_mode == "openai"
+    assert create_reasoner(unconfigured).mode == unconfigured.reasoning_mode == "deterministic_demo"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "What is the capital of Bolivia?",
+        "Why does ice float on water?",
+        "Explain the difference between a stack and a queue.",
+    ],
+)
+async def test_openai_general_graph_returns_block_text_without_tools(harness, monkeypatch, prompt):
+    async def no_tools(*_args, **_kwargs):
+        raise AssertionError("A general answer must not discover or invoke MCP/Web tools")
+
+    monkeypatch.setattr(harness.gateway, "discover", no_tools)
+    monkeypatch.setattr(harness.gateway, "invoke", no_tools)
+    model = _AnswerModel([{"type": "text", "text": "Direct model answer."}])
+    reasoner = OpenAIReasoner(Settings(_env_file=None, openai_api_key="configured"), model=model)
+    graph = build_daypilot_graph(
+        WorkflowDependencies(
+            harness.repository, harness.gateway, reasoner, PlanBuilder("Asia/Kolkata")
+        ),
+        harness.graph.checkpointer,
+    )
+    coordinator = RunCoordinator(graph, harness.repository, harness.gateway)
+    try:
+        accepted = await coordinator.start_run(prompt)
+        detail = await coordinator.wait_until_settled(accepted.id)
+        assert detail.status == "completed"
+        assert detail.reasoning_mode == "openai"
+        assert detail.intent.request_kind == "general"
+        assert detail.final_summary == "Direct model answer."
+        assert detail.available_tools == detail.plan == []
+        assert not any(detail.context.values())
+        assert await harness.repository.list_executions(accepted.id) == []
+        assert [event.event_type for event in detail.events] == [
+            "request_received", "request_understood", "general_answer_generated", "run_completed"
+        ]
+        assert model.calls == ["general_answer"]
+    finally:
+        await coordinator.shutdown()
 
 
 @pytest.mark.asyncio
