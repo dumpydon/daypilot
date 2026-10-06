@@ -5,11 +5,20 @@
   "compatibility_flags": [
     "nodejs_compat"
   ],
-  "main": "vinext/server/fetch-handler",
+  "main": "worker/index.ts",
+  "vars": {
+    "RENDER_API_BASE_URL": "https://daypilot-2z65.onrender.com"
+  },
+  "kv_namespaces": [
+    { "binding": "DAYPILOT_STATE", "id": "25ec1ec59f1c4ca3bbc0da014448939b" }
+  ],
+  "triggers": { "crons": ["*/10 * * * *", "30 3 * * *"] },
+  "observability": { "enabled": true },
   "assets": {
     "directory": "dist/client",
     "not_found_handling": "none",
-    "binding": "ASSETS"
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/warm/*"]
   },
   // Supply NEXT_PUBLIC_API_URL as a Cloudflare Workers Build variable so the
   // client bundle targets the Render backend without baking in a repository URL.

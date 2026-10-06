@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import secrets
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response, status
@@ -35,6 +37,7 @@ from backend.app.services.coordinator import TERMINAL_STATUSES, RunCoordinator
 from backend.app.timing import timed
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _services(request: Request) -> tuple[RunCoordinator, DayPilotRepository, MCPGateway, Settings]:
@@ -106,6 +109,36 @@ async def health(request: Request, response: Response) -> HealthResponse:
         demo_mode=settings.daypilot_demo_mode,
         reasoning_mode=settings.reasoning_mode,
         runtime_state=getattr(request.app.state, "runtime_state", "starting"),
+    )
+
+
+@router.get("/internal/database-heartbeat", include_in_schema=False)
+async def database_heartbeat(request: Request) -> JSONResponse:
+    settings = request.app.state.settings
+    headers = {"Cache-Control": "no-store"}
+    secret = settings.maintenance_secret
+    if not secret:
+        return JSONResponse({"status": "unavailable"}, status_code=503, headers=headers)
+    expected = f"Bearer {secret}".encode()
+    supplied = request.headers.get("authorization", "").encode()
+    if not secrets.compare_digest(supplied, expected):
+        return JSONResponse({"status": "unauthorized"}, status_code=401, headers=headers)
+    try:
+        # Available even while unrelated graph/provider bootstrap is pending.
+        repository = DayPilotRepository(settings.database_target)
+        async with asyncio.timeout(15):
+            checked_at = await repository.database_heartbeat()
+    except Exception as exc:
+        logger.warning("Daily database heartbeat failed (%s)", type(exc).__name__)
+        return JSONResponse({"status": "unavailable"}, status_code=503, headers=headers)
+    logger.info("Daily database heartbeat succeeded")
+    return JSONResponse(
+        {
+            "status": "ok",
+            "database": "postgresql" if settings.database_is_postgres else "sqlite",
+            "checked_at": checked_at,
+        },
+        headers=headers,
     )
 
 

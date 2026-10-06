@@ -195,6 +195,7 @@ def _redacted_bootstrap_traceback(exc: Exception, settings: Settings) -> str:
     trace = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
     secrets = (
         settings.database_url,
+        settings.maintenance_secret,
         settings.database_connection_url,
         settings.openai_api_key,
         settings.tavily_api_key,

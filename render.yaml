@@ -30,6 +30,8 @@ services:
         sync: false
       - key: DAYPILOT_ADMIN_SECRET
         sync: false
+      - key: DAYPILOT_MAINTENANCE_SECRET
+        sync: false
       - key: COMPOSIO_CALLBACK_URL
         value: https://daypilot-2z65.onrender.com/api/connections/managed/callback
       - key: DAYPILOT_SITE_URL

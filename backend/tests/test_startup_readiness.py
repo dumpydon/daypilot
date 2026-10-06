@@ -17,6 +17,7 @@ def test_health_is_available_while_runtime_bootstrap_is_pending(
         database_url=f"sqlite:///{tmp_path / 'startup.db'}",
         daypilot_demo_mode=False,
         public_demo_mode=True,
+        maintenance_secret="heartbeat-during-startup",
     )
 
     async def pending_bootstrap(app, bootstrap_settings, shutdown_event):
@@ -32,6 +33,12 @@ def test_health_is_available_while_runtime_bootstrap_is_pending(
         assert health.json()["runtime_state"] == "starting"
         assert health.json()["database"] == "initializing"
         assert health.json()["graph"] == "initializing"
+        heartbeat = client.get(
+            "/internal/database-heartbeat",
+            headers={"Authorization": "Bearer heartbeat-during-startup"},
+        )
+        assert heartbeat.status_code == 200
+        assert heartbeat.json()["checked_at"]
         assert client.get("/api/readiness").json()["state"] == "starting"
         assert client.post("/api/runs", json={"request": "What is 2 + 2?"}).status_code == 503
 

@@ -23,6 +23,9 @@ import { DayPilotWorkspace } from "@/components/DayPilotWorkspace";
 
 import { capabilityCatalog, makeEvent, makeRun } from "./factories";
 
+const warmActivation = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/warmWindow", () => ({ activateWarmWindow: warmActivation }));
+
 class FakeEventSource {
   constructor() { streamOpened(); }
   addEventListener = vi.fn();
@@ -83,6 +86,14 @@ describe("optimistic run submission", () => {
       state: "completed",
       title: "Request received",
     })] }));
+  });
+
+  it("loads the workspace while warm activation remains pending", async () => {
+    warmActivation.mockReturnValueOnce(new Promise(() => {}));
+    render(<DayPilotWorkspace />);
+    await waitFor(() => expect(api.getTools).toHaveBeenCalled());
+    expect(screen.getByRole("textbox", { name: "Goal" })).toBeInTheDocument();
+    expect(warmActivation).toHaveBeenCalledTimes(1);
   });
 
   it("finishes admin authentication before service refresh and never saves preferences", async () => {

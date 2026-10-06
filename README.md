@@ -291,6 +291,28 @@ tables automatically. Existing SQLite data is not copied implicitly; preserve an
 current production history and pending approvals with a one-time database migration
 before switching Render's `DATABASE_URL`.
 
+### Backend warm windows
+
+The free Render backend may sleep after inactivity. Opening DayPilot activates one
+global, fixed three-hour lease in Cloudflare KV; revisits do not extend an active
+lease. The existing `daypilot` Worker checks it every ten minutes (`*/10 * * * *`)
+and calls only Render `/health` while the lease is active.
+
+A second trigger (`30 3 * * *`, 09:00 IST) ensures the morning window through
+12:00 IST, preserving an already-longer lease. It wakes Render through the protected
+`/internal/database-heartbeat` route, which executes a read-only `SELECT 1` and reads
+the database clock through the existing PostgreSQL connection. It creates no rows
+and invokes no OpenAI, LangGraph runs, MCP tools, or connected-provider workflows.
+Daily cold starts get at most three attempts within a 90-second budget. This
+activity is best-effort; it is not a guarantee against Supabase free-project pausing.
+
+`frontend/wrangler.jsonc` owns the KV binding and both triggers. Set the same
+random `DAYPILOT_MAINTENANCE_SECRET` as a Cloudflare Worker secret and a Render
+environment variable; keep it separate from the admin secret and out of client
+build variables. Activation/KV/network/database failures do not block application
+bootstrap. The existing cold-start UI is unchanged. KV eventual consistency means
+near-simultaneous first activations can race, as in the Jevon reference.
+
 ## Project structure
 
 ```text

@@ -50,6 +50,9 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("DAYPILOT_ADMIN_SECRET", "ADMIN_SECRET"),
     )
+    maintenance_secret: str | None = Field(
+        default=None, validation_alias="DAYPILOT_MAINTENANCE_SECRET"
+    )
     admin_session_ttl_seconds: int = Field(
         default=28_800,
         ge=300,

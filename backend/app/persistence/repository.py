@@ -241,6 +241,17 @@ class DayPilotRepository:
         )
         self.maintenance_lock = asyncio.Lock()
 
+    async def database_heartbeat(self) -> str:
+        """Read the database clock without creating or changing application rows."""
+        async with self._connect() as connection:
+            row = await self._fetchone(
+                connection,
+                "SELECT 1 AS alive, CURRENT_TIMESTAMP AS checked_at /* daypilot_daily_heartbeat */",
+            )
+        if not row or row["alive"] != 1:
+            raise RuntimeError("Database heartbeat failed")
+        return str(row["checked_at"])
+
     async def initialize(self) -> None:
         async with self._connect() as connection:
             await connection.executescript(

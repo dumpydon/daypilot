@@ -40,6 +40,7 @@ import type {
   ToolCatalog,
 } from "@/lib/types";
 import { endTiming, startTiming } from "@/lib/timing";
+import { activateWarmWindow } from "@/lib/warmWindow";
 
 import { ContextPanel } from "./ContextPanel";
 import { ConfirmationDialog } from "./ConfirmationDialog";
@@ -203,6 +204,7 @@ export function DayPilotWorkspace() {
 
   useEffect(() => {
     let cancelled = false;
+    void activateWarmWindow();
     async function loadWorkspace() {
       try {
         let current: ReadinessStatus | null = null;
